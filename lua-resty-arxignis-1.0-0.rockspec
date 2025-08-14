@@ -18,7 +18,6 @@ dependencies = {
    "lua >= 5.1",
    "lua-resty-core >= 0.1.0",
    "lua-resty-http >= 0.15.0",
-   "lua-cjson >= 2.5.0",
    "lua-resty-mlcache >= 2.6.0",
    "lua-resty-jwt >= 0.2.3",
    "lua-resty-cookie >= 0.4.1",
