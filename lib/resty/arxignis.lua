@@ -7,7 +7,8 @@ local function validate_environment()
         "ARXIGNIS_API_URL",
         "ARXIGNIS_API_KEY",
         "ARXIGNIS_CAPTCHA_SECRET_KEY",
-        "ARXIGNIS_CAPTCHA_SITE_KEY"
+        "ARXIGNIS_CAPTCHA_SITE_KEY",
+        "ARXIGNIS_CAPTCHA_PROVIDER"
     }
 
     local missing_vars = {}
@@ -215,9 +216,27 @@ function arxignis.remediate(ipaddress)
 
   if remediation_response.remediation.action == "captcha" then
     local captcha_ok = true
-    local secret_key = os.getenv("ARXIGNIS_CAPTCHA_SECRET_KEY")
-    local site_key = os.getenv("ARXIGNIS_CAPTCHA_SITE_KEY")
-    local err = captcha.new(site_key, secret_key, "/usr/local/openresty/lualib/resty/arxignis/templates/captcha.html", "turnstile", "200")
+    local env_config = _G.arxignis_env_config or {}
+    local secret_key = env_config.ARXIGNIS_CAPTCHA_SECRET_KEY
+    local site_key = env_config.ARXIGNIS_CAPTCHA_SITE_KEY
+    local captcha_provider = env_config.ARXIGNIS_CAPTCHA_PROVIDER
+    local captcha_template_path = env_config.ARXIGNIS_CAPTCHA_TEMPLATE_PATH
+
+    -- Check if captcha is properly configured
+    if not secret_key or not site_key then
+      logger.warn("Captcha not configured, skipping captcha challenge", {
+        has_secret_key = secret_key ~= nil,
+        has_site_key = site_key ~= nil
+      })
+      return true
+    end
+
+    if captcha_provider ~= "turnstile" and captcha_provider ~= "recaptcha" and captcha_provider ~= "hcaptcha" then
+      logger.error("Invalid captcha provider set, skipping captcha", {provider = captcha_provider})
+      return true
+    end
+
+    local err = captcha.new(site_key, secret_key, captcha_template_path, captcha_provider, "200")
     if err ~= nil then
       logger.error("Error loading captcha plugin", {error = err})
       captcha_ok = false
