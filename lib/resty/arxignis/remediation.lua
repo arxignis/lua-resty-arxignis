@@ -10,7 +10,7 @@ local DEFAULT_RESPONSE = {
     success = true,
     remediation = {
         ip = "0.0.0.0",
-        score = 0,
+        ruleId = "unknown",
         action = "none",
         expired = 600
     }
@@ -109,8 +109,8 @@ function remediation.get(ipaddress)
     end
 
     -- Ensure required fields have default values
-    if not result.remediation.score then
-        result.remediation.score = 0
+    if not result.remediation.ruleId then
+        result.remediation.ruleId = "unknown"
     end
     if not result.remediation.expired then
         result.remediation.expired = 600
@@ -119,7 +119,7 @@ function remediation.get(ipaddress)
     logger.info("Remediation response for IP", {
         ip_address = ipaddress,
         action = result.remediation.action,
-        score = result.remediation.score or "unknown"
+        ruleId = result.remediation.ruleId or "unknown"
     })
 
     return result
@@ -137,7 +137,7 @@ function remediation.get(ipaddress)
   local telemetry_data = {
     clientIp = ipaddress,
     decision = rem_cache.remediation.action or "unknown",
-    score = rem_cache.remediation.score or 0,
+    ruleId = rem_cache.remediation.ruleId or "unknown",
     cached = hit_level ~= "miss"
   }
   metrics.metrics(log_env, telemetry_data)
