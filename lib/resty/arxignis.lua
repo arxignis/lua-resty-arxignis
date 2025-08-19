@@ -8,8 +8,7 @@ local function validate_environment()
         "ARXIGNIS_API_KEY",
         "ARXIGNIS_CAPTCHA_SECRET_KEY",
         "ARXIGNIS_CAPTCHA_SITE_KEY",
-        "ARXIGNIS_CAPTCHA_PROVIDER",
-        "ARXIGNIS_MODE"
+        "ARXIGNIS_CAPTCHA_PROVIDER"
     }
 
     local missing_vars = {}
@@ -36,9 +35,9 @@ end
 local env_valid = validate_environment()
 
 local mode = os.getenv("ARXIGNIS_MODE")
-if mode ~= "monitor" and mode ~= "block" then
-    logger.error("Invalid mode", {mode = mode})
-    -- Don't return false here, just log the error
+if mode ~= "block" then
+    mode = "monitor"
+    logger.warn("ARXIGNIS_MODE is not set, defaulting to monitor mode")
 end
 
 -- Helper function to generate secure captcha token
