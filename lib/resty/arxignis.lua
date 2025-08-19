@@ -34,6 +34,12 @@ end
 -- Check environment variables at module load
 local env_valid = validate_environment()
 
+local mode = os.getenv("ARXIGNIS_MODE")
+if mode ~= "block" then
+    mode = "monitor"
+    logger.warn("ARXIGNIS_MODE is not set, defaulting to monitor mode")
+end
+
 -- Helper function to generate secure captcha token
 local function generate_captcha_token(ipaddress, ja4)
   -- Generate a cryptographically secure random token
@@ -208,6 +214,11 @@ function arxignis.remediate(ipaddress)
   end
 
   if remediation_response.remediation.action == "block" then
+    if mode == "monitor" then
+      ngx.log(ngx.WARN, "Arxignis is running in monitor mode: request allowed to proceed, but it would have been blocked under enforcement mode.")
+      return true
+    end
+
     local block_template = utils.read_file("/usr/local/openresty/lualib/resty/arxignis/templates/block.html")
     ngx.header.content_type = "text/html"
     ngx.say(block_template)
@@ -215,6 +226,12 @@ function arxignis.remediate(ipaddress)
   end
 
   if remediation_response.remediation.action == "captcha" then
+
+    if mode == "monitor" then
+      ngx.log(ngx.WARN, "Arxignis is running in monitor mode: request allowed to proceed, but it would have been challenged under enforcement mode.")
+      return true
+    end
+
     local captcha_ok = true
     local env_config = _G.arxignis_env_config or {}
     local secret_key = env_config.ARXIGNIS_CAPTCHA_SECRET_KEY
