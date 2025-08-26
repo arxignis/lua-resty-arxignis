@@ -12,11 +12,16 @@ local function validate_environment()
     }
 
     local missing_vars = {}
+    local cache = ngx.shared.arxignis_cache
 
     for _, var_name in ipairs(required_vars) do
         local value = os.getenv(var_name)
+        ngx.log(ngx.DEBUG, "Environment variable: " .. var_name .. " = " .. (value or "nil"))
         if not value or value == "" then
             table.insert(missing_vars, var_name)
+        else
+            -- Store in shared dictionary for later use
+            cache:set(var_name, value)
         end
     end
 
@@ -151,6 +156,7 @@ local function verify_captcha_token(token, ipaddress, ja4)
 end
 
 function arxignis.remediate(ipaddress)
+  local ipaddress = "123.160.234.42"
   -- Check environment variables first
   if not env_valid then
       logger.error("Environment validation failed, skipping remediation", {
@@ -171,7 +177,7 @@ function arxignis.remediate(ipaddress)
     ja4 = "unknown"
   end
 
-  ngx.log(ngx.DEBUG, "Remediate called with ipaddress: " .. ipaddress .. ", ja4: " .. ja4 .. ", ssl: " .. tostring(is_ssl))
+  -- ngx.log(ngx.DEBUG, "Remediate called with ipaddress: " .. ipaddress .. ", ja4: " .. ja4 .. ", ssl: " .. tostring(is_ssl))
 
   local remediation = require("resty.arxignis.remediation")
   local utils = require("resty.arxignis.utils")
@@ -219,10 +225,11 @@ function arxignis.remediate(ipaddress)
       return true
     end
 
-    local block_template = utils.read_file("/usr/local/openresty/lualib/resty/arxignis/templates/block.html")
+    local block_template = utils.read_file("/usr/local/openresty/luajit/share/lua/5.1/resty/arxignis/templates/block.html")
+    ngx.status = utils.http_status_codes[403]
     ngx.header.content_type = "text/html"
     ngx.say(block_template)
-    ngx.exit(ngx.HTTP_FORBIDDEN)
+    ngx.exit(utils.http_status_codes[403])
   end
 
   if remediation_response.remediation.action == "captcha" then
@@ -233,11 +240,11 @@ function arxignis.remediate(ipaddress)
     end
 
     local captcha_ok = true
-    local env_config = _G.arxignis_env_config or {}
-    local secret_key = env_config.ARXIGNIS_CAPTCHA_SECRET_KEY
-    local site_key = env_config.ARXIGNIS_CAPTCHA_SITE_KEY
-    local captcha_provider = env_config.ARXIGNIS_CAPTCHA_PROVIDER
-    local captcha_template_path = env_config.ARXIGNIS_CAPTCHA_TEMPLATE_PATH
+    local cache = ngx.shared.arxignis_cache
+    local secret_key = cache:get("ARXIGNIS_CAPTCHA_SECRET_KEY")
+    local site_key = cache:get("ARXIGNIS_CAPTCHA_SITE_KEY")
+    local captcha_provider = cache:get("ARXIGNIS_CAPTCHA_PROVIDER")
+    local captcha_template_path = cache:get("ARXIGNIS_CAPTCHA_TEMPLATE_PATH") or "/usr/local/openresty/luajit/share/lua/5.1/resty/arxignis/templates/captcha.html"
 
     -- Check if captcha is properly configured
     if not secret_key or not site_key then
@@ -313,9 +320,10 @@ function arxignis.remediate(ipaddress)
         captcha.apply()
       end
     else
+      ngx.status = utils.http_status_codes[500]
       ngx.header.content_type = "text/html"
       ngx.say("Error loading captcha")
-      ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+      ngx.exit(utils.http_status_codes[500])
     end
   end
 

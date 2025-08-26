@@ -12,7 +12,8 @@ function metrics.metrics(env, remediation_result)
         hostName = utils.get_host_name(),
         remediation = remediation_result.decision or "unknown",
         score = remediation_result.score or 0,
-        cached = remediation_result.cached or false
+        cached = remediation_result.cached or false,
+        ruleId = remediation_result.ruleId or "unknown"
     }
 
     -- Add metrics to batch using worker module (separate from logs)

@@ -18,6 +18,23 @@ utils.HTTP_CODE["406"] = ngx.HTTP_NOT_ACCEPTABLE
 utils.HTTP_CODE["444"] = ngx.HTTP_CLOSE
 utils.HTTP_CODE["500"] = ngx.HTTP_INTERNAL_SERVER_ERROR
 
+utils.http_status_codes = {
+  [200] = ngx.HTTP_OK,
+  [202] = ngx.HTTP_ACCEPTED,
+  [204] = ngx.HTTP_NO_CONTENT,
+  [301] = ngx.HTTP_MOVED_PERMANENTLY,
+  [302] = ngx.HTTP_MOVED_TEMPORARILY,
+  [400] = ngx.HTTP_BAD_REQUEST,
+  [401] = ngx.HTTP_UNAUTHORIZED,
+  [403] = ngx.HTTP_FORBIDDEN,
+  [404] = ngx.HTTP_NOT_FOUND,
+  [405] = ngx.HTTP_NOT_ALLOWED,
+  [406] = ngx.HTTP_NOT_ACCEPTABLE,
+  [444] = ngx.HTTP_CLOSE,
+  [500] = ngx.HTTP_INTERNAL_SERVER_ERROR,
+}
+
+
 function utils.read_file(path)
    local file = io.open(path, "r") -- r read mode and b binary mode
    if not file then return nil end
