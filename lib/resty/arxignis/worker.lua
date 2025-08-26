@@ -28,7 +28,7 @@ local function get_lock(lock_key, interval)
             ngx.log(ngx.DEBUG, "Lock already exists for key: " .. key)
             return nil
         end
-        error("failed to add key \"", key, "\": ", err)
+        error("failed to add key \"" .. key .. "\": " .. err)
         return nil
     end
     ngx.log(ngx.DEBUG, "Lock acquired for key: " .. key)
@@ -94,13 +94,14 @@ function worker.add_log_to_batch(env, log_entry)
     local batch_data = dict:get(batch_key)
     local batch = {}
 
-    if batch_data then
+
+    if batch_data and #batch_data > 0 then
         local success, decoded = pcall(cjson.decode, batch_data)
         if success then
             batch = decoded
             ngx.log(ngx.DEBUG, "Loaded existing batch with " .. #batch .. " logs")
         else
-            ngx.log(ngx.WARN, "Failed to decode existing batch, starting fresh")
+            ngx.log(ngx.WARN, "Failed to decode existing batch, starting fresh" .. (cjson.encode(batch_data) or "nil"))
             -- Clear the corrupted data
             dict:set(batch_key, "")
             ngx.log(ngx.DEBUG, "Cleared corrupted batch data from shared memory")
@@ -156,13 +157,13 @@ function worker.add_metrics_to_batch(env, metrics_entry)
     local batch_data = dict:get(batch_key)
     local batch = {}
 
-    if batch_data then
+    if batch_data and #batch_data > 0 then
         local success, decoded = pcall(cjson.decode, batch_data)
         if success then
             batch = decoded
             ngx.log(ngx.DEBUG, "Loaded existing metrics batch with " .. #batch .. " entries")
         else
-            ngx.log(ngx.WARN, "Failed to decode existing metrics batch, starting fresh")
+            ngx.log(ngx.WARN, "Failed to decode existing metrics batch, starting fresh" .. (cjson.encode(batch_data) or "nil"))
             -- Clear the corrupted data
             dict:set(batch_key, "")
             ngx.log(ngx.DEBUG, "Cleared corrupted metrics batch data from shared memory")
@@ -255,7 +256,7 @@ local function flush_logs_timer(premature, env)
     if not ok then
         ngx.log(ngx.ERR, "Failed to reschedule flush timer: " .. (err or "unknown error"))
     else
-        ngx.log(ngx.DEBUG, "Timer rescheduled successfully for worker " .. ngx.worker.id())
+       ngx.log(ngx.DEBUG, "Timer rescheduled successfully for worker " .. ngx.worker.id())
     end
 end
 
@@ -327,7 +328,7 @@ function worker.start_flush_timers(env)
     if not ok then
         ngx.log(ngx.ERR, "Failed to start logs flush timer: " .. (err or "unknown error"))
     else
-        ngx.log(ngx.DEBUG, "Logs flush timer started successfully for worker " .. ngx.worker.id())
+       ngx.log(ngx.DEBUG, "Logs flush timer started successfully for worker " .. ngx.worker.id())
     end
 
     -- Start the metrics timer
