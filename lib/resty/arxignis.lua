@@ -156,7 +156,6 @@ local function verify_captcha_token(token, ipaddress, ja4)
 end
 
 function arxignis.remediate(ipaddress)
-  local ipaddress = "123.160.234.42"
   -- Check environment variables first
   if not env_valid then
       logger.error("Environment validation failed, skipping remediation", {
