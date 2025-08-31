@@ -35,5 +35,8 @@ build = {
       ["resty.arxignis.utils"] = "lib/resty/arxignis/utils.lua",
       ["resty.arxignis.template"] = "lib/resty/arxignis/template.lua",
       ["resty.arxignis.log"] = "lib/resty/arxignis/log.lua"
+   },
+   copy_directories = {
+      "lib/resty/arxignis/templates"
    }
 }
