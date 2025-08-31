@@ -224,7 +224,7 @@ function arxignis.remediate(ipaddress)
       return true
     end
 
-    local block_template = utils.read_file("/usr/local/openresty/luajit/share/lua/5.1/resty/arxignis/templates/block.html")
+    local block_template = utils.read_file("/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/block.html")
     ngx.status = utils.http_status_codes[403]
     ngx.header.content_type = "text/html"
     ngx.say(block_template)
@@ -243,7 +243,7 @@ function arxignis.remediate(ipaddress)
     local secret_key = cache:get("ARXIGNIS_CAPTCHA_SECRET_KEY")
     local site_key = cache:get("ARXIGNIS_CAPTCHA_SITE_KEY")
     local captcha_provider = cache:get("ARXIGNIS_CAPTCHA_PROVIDER")
-    local captcha_template_path = cache:get("ARXIGNIS_CAPTCHA_TEMPLATE_PATH") or "/usr/local/openresty/luajit/share/lua/5.1/resty/arxignis/templates/captcha.html"
+    local captcha_template_path = cache:get("ARXIGNIS_CAPTCHA_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/captcha.html"
 
     -- Check if captcha is properly configured
     if not secret_key or not site_key then
