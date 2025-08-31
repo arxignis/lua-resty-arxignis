@@ -54,7 +54,7 @@ function remediation.get(ipaddress)
         return DEFAULT_RESPONSE
     end
 
-    local url = api_url .. "/remediation"
+    local url = api_url .. "/remediation/" .. ipaddress
     local timeout = 1000
     local api_key = os.getenv("ARXIGNIS_API_KEY")
     local ssl_verify = true
@@ -133,14 +133,14 @@ function remediation.get(ipaddress)
   end
   ngx.log(ngx.DEBUG, "Cache hit level: " .. hit_level)
 
-  -- Send telemetry data
-  local telemetry_data = {
+  -- Send metrics data
+  local metrics_data = {
     clientIp = ipaddress,
     decision = rem_cache.remediation.action or "unknown",
     ruleId = rem_cache.remediation.ruleId or "unknown",
     cached = hit_level ~= "miss"
   }
-  metrics.metrics(log_env, telemetry_data)
+  metrics.metrics(log_env, metrics_data)
 
       -- Store in secondary cache for future reference
   local secondary_cache_key = "remediation:" .. ipaddress
