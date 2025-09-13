@@ -200,7 +200,7 @@ function arxignis.remediate(ipaddress)
     end
   end
 
-  local remediation_response = remediation.get(ipaddress)
+  local remediation_response = remediation.get(ipaddress, mode)
 
   -- Validate remediation response
   if not remediation_response then

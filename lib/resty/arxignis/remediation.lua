@@ -17,7 +17,7 @@ local DEFAULT_RESPONSE = {
     }
 }
 
-function remediation.get(ipaddress)
+function remediation.get(ipaddress, mode)
   -- Log the remediation request
   local log_env = {
     ARXIGNIS_API_URL = os.getenv("ARXIGNIS_API_URL"),
@@ -174,11 +174,15 @@ function remediation.get(ipaddress)
   -- Send metrics data
   local metrics_data = {
     clientIp = ipaddress,
-    decision = rem_cache.remediation.action or "unknown",
+    remediation = rem_cache.remediation.action or "none",
     ruleId = rem_cache.remediation.ruleId or "unknown",
-    cached = hit_level ~= "miss"
   }
-  metrics.metrics(log_env, metrics_data)
+
+  if rem_cache.remediation.action ~= "none" then
+    if mode == "block" then
+      metrics.metrics(log_env, metrics_data)
+    end
+  end
 
       -- Store in secondary cache for future reference
   local secondary_cache_key = "remediation:" .. ipaddress
