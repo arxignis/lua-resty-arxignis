@@ -46,6 +46,7 @@ function remediation.get(ipaddress, mode)
     return DEFAULT_RESPONSE
   end
 
+  -- Fall back to remediation API if no access rule matches
   local function callback()
 
     local api_url = os.getenv("ARXIGNIS_API_URL")

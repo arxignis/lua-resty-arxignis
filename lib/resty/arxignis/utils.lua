@@ -1,4 +1,5 @@
-local http = require "resty.http"
+local ok_http, http = pcall(require, "resty.http")
+local bit = require "bit"
 
 local utils = {_TYPE='module', _NAME='arxignis.utils', _VERSION='1.0-0'}
 
@@ -75,40 +76,117 @@ end
 
 -- Generic HTTP client function
 function utils.http_request(url, options)
-  local httpc = http.new()
+  -- If resty.http is available, use it
+  if ok_http and http and http.new then
+    local httpc = http.new()
 
-  -- Set timeout (default 30 seconds)
-  local timeout = options.timeout or 30000
-  httpc:set_timeout(timeout)
+    -- Set timeout (default 30 seconds)
+    local timeout = options.timeout or 30000
+    httpc:set_timeout(timeout)
 
-  -- Prepare headers
+    -- Prepare headers
+    local headers = options.headers or {}
+    if not headers['Connection'] then
+      headers['Connection'] = 'close'
+    end
+    if not headers['User-Agent'] then
+      headers['User-Agent'] = 'Arxignis/1.0'
+    end
+
+    -- Prepare request options
+    local request_opts = {
+      method = options.method or 'GET',
+      headers = headers,
+      ssl_verify = options.ssl_verify ~= false -- default to true
+    }
+
+    -- Add body if provided
+    if options.body then
+      request_opts.body = options.body
+    end
+
+    -- Make the request
+    local res, err = httpc:request_uri(url, request_opts)
+
+    -- Close connection
+    httpc:close()
+
+    return res, err
+  end
+
+  -- Fallback simple HTTP client using cosocket (HTTP only)
+  local parsed = {}
+  do
+    -- Only support http://host[:port]/path[?query]
+    local scheme, host, port, path = string.match(url, "^(https?)://([^/:]+):?(%d*)(/.*)$")
+    if not scheme or scheme ~= "http" then
+      return nil, "unsupported_url_scheme"
+    end
+    parsed.host = host
+    parsed.port = tonumber(port) or 80
+    parsed.path = path ~= "" and path or "/"
+  end
+
+  local sock = ngx.socket.tcp()
+  sock:settimeout(options.timeout or 30000)
+  local ok, err = sock:connect(parsed.host, parsed.port)
+  if not ok then
+    return nil, err or "connect_failed"
+  end
+
+  local method = options.method or 'GET'
   local headers = options.headers or {}
-  if not headers['Connection'] then
-    headers['Connection'] = 'close'
+  local body = options.body or nil
+
+  if not headers['Host'] then headers['Host'] = parsed.host end
+  if not headers['User-Agent'] then headers['User-Agent'] = 'Arxignis/1.0' end
+  if not headers['Connection'] then headers['Connection'] = 'close' end
+  if body and not headers['Content-Length'] then headers['Content-Length'] = tostring(#body) end
+
+  local req_lines = { string.format("%s %s HTTP/1.1", method, parsed.path) }
+  for k, v in pairs(headers) do
+    table.insert(req_lines, string.format("%s: %s", k, v))
   end
-  if not headers['User-Agent'] then
-    headers['User-Agent'] = 'Arxignis/1.0'
+  table.insert(req_lines, "")
+  table.insert(req_lines, body or "")
+
+  local bytes, send_err = sock:send(table.concat(req_lines, "\r\n"))
+  if not bytes then
+    sock:close()
+    return nil, send_err or "send_failed"
   end
 
-  -- Prepare request options
-  local request_opts = {
-    method = options.method or 'GET',
-    headers = headers,
-    ssl_verify = options.ssl_verify ~= false -- default to true
-  }
-
-  -- Add body if provided
-  if options.body then
-    request_opts.body = options.body
+  local chunks = {}
+  while true do
+    local data, recv_err, partial = sock:receive(8192)
+    if data then
+      table.insert(chunks, data)
+    elseif partial and #partial > 0 then
+      table.insert(chunks, partial)
+    end
+    if recv_err == "closed" then
+      break
+    elseif recv_err then
+      sock:close()
+      return nil, recv_err
+    end
   end
+  sock:close()
 
-  -- Make the request
-  local res, err = httpc:request_uri(url, request_opts)
+  local raw = table.concat(chunks)
+  local header_body_sep = string.find(raw, "\r\n\r\n", 1, true)
+  if not header_body_sep then
+    return nil, "invalid_http_response"
+  end
+  local header_str = string.sub(raw, 1, header_body_sep - 1)
+  local body_str = string.sub(raw, header_body_sep + 4)
 
-  -- Close connection
-  httpc:close()
+  local status_line_end = string.find(header_str, "\r\n", 1, true) or (#header_str + 1)
+  local status_line = string.sub(header_str, 1, status_line_end - 1)
+  local _, _, code = string.find(status_line, "HTTP/%d%.%d (%d%d%d)")
+  local status = tonumber(code) or 0
 
-  return res, err
+  return { status = status, body = body_str, headers = {} }, nil
 end
 
 function utils.get_remediation_http_request(url, timeout, api_key, ssl_verify)
@@ -145,6 +223,59 @@ function utils.post_remediation_http_request(url, timeout, api_key, ssl_verify, 
     ssl_verify = ssl_verify,
     body = body
   })
+end
+
+function utils.get_http_request(url, timeout, api_key, ssl_verify)
+  local headers = {}
+
+  -- Only add Authorization header if api_key is provided
+  if api_key and api_key ~= "" then
+    headers['Authorization'] = 'Bearer ' .. api_key
+  end
+
+  return utils.http_request(url, {
+    method = 'GET',
+    timeout = timeout,
+    headers = headers,
+    ssl_verify = ssl_verify
+  })
+end
+
+-- Check if IP is within a CIDR range
+function utils.is_ip_in_cidr(ip, cidr)
+  if not ip or not cidr then
+    return false
+  end
+
+  -- Parse the CIDR range
+  local network, bits = cidr:match("([^/]+)/(%d+)")
+  if not network then
+    -- Handle single IP (without CIDR notation)
+    return ip == cidr
+  end
+
+  bits = tonumber(bits)
+  if not bits then
+    return false
+  end
+
+  -- Convert IP and network to numbers for comparison
+  local function ip_to_number(ip_str)
+    local num = 0
+    for part in ip_str:gmatch("%d+") do
+      num = num * 256 + tonumber(part)
+    end
+    return num
+  end
+
+  local ip_num = ip_to_number(ip)
+  local network_num = ip_to_number(network)
+
+  -- Calculate network mask
+  local mask = bit.bnot(2^(32 - bits) - 1)
+  
+  -- Check if IP is in the network
+  return bit.band(ip_num, mask) == bit.band(network_num, mask)
 end
 
 function utils.split_on_delimiter(str, delimiter)
