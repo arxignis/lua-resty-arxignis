@@ -4,7 +4,6 @@ local cjson = require("cjson")
 local logger = require("resty.arxignis.logger")
 local log_module = require("resty.arxignis.log")
 local metrics = require("resty.arxignis.metrics")
-local access_rules = require("resty.arxignis.access_rules")
 
 -- Default fallback response when API fails
 local DEFAULT_RESPONSE = {
@@ -45,42 +44,6 @@ function remediation.get(ipaddress, mode)
   if not ipaddress or ipaddress == "" then
     logger.warn("No IP address provided for remediation lookup")
     return DEFAULT_RESPONSE
-  end
-
-  -- First try to evaluate using access rules
-  local rules = access_rules.get()
-  if rules then
-    local rule_result = access_rules.evaluate(ipaddress, rules)
-    if rule_result then
-      logger.info("Access rule match found for IP", {
-        ip_address = ipaddress,
-        action = rule_result.action,
-        ruleId = rule_result.ruleId
-      })
-      
-      -- Create response from rule result
-      local response = {
-        success = true,
-        remediation = {
-          ip = ipaddress,
-          ruleId = rule_result.ruleId,
-          action = rule_result.action,
-          expired = rule_result.expired or 600
-        }
-      }
-      
-      -- Send metrics for access rule hit
-      local metrics_data = {
-        clientIp = ipaddress,
-        decision = rule_result.action or "unknown",
-        ruleId = rule_result.ruleId or "unknown",
-        cached = true,
-        source = "access_rules"
-      }
-      metrics.metrics(log_env, metrics_data)
-      
-      return response
-    end
   end
 
   -- Fall back to remediation API if no access rule matches

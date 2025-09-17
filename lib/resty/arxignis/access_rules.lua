@@ -1,8 +1,30 @@
 local cjson = require("cjson")
 local utils = require("resty.arxignis.utils")
 local logger = require("resty.arxignis.logger")
+local metrics = require("resty.arxignis.metrics")
 
 local access_rules = {_TYPE='module', _NAME='arxignis.access_rules', _VERSION='1.0-0'}
+local rule_id = os.getenv("ARXIGNIS_ACCESS_RULE_ID")
+local env = {
+  ARXIGNIS_API_URL = os.getenv("ARXIGNIS_API_URL"),
+  ARXIGNIS_API_KEY = os.getenv("ARXIGNIS_API_KEY")
+}
+
+
+if not rule_id or rule_id == "" then
+  logger.warn("ARXIGNIS_ACCESS_RULE_ID not set; access rules disabled")
+  -- Return a module with disabled functionality instead of nil
+  function access_rules.get()
+    return nil
+  end
+  function access_rules.get_access_rules()
+    return nil
+  end
+  function access_rules.evaluate(_, _)
+    return nil
+  end
+  return access_rules
+end
 
 -- Flatten resolved access rule categories into a simple list of CIDRs/IPs
 local function collect_ip_ranges(category)
@@ -82,6 +104,8 @@ local function normalize_rules(data)
       name = rule.name or "",
       allow_ips = allow_ips,
       block_ips = block_ips,
+      allow = rule.allow,  -- Preserve original allow data for country/ASN matching
+      block = rule.block,  -- Preserve original block data for country/ASN matching
     })
   end
 
@@ -101,20 +125,17 @@ local function has_any_ip_ranges(rules)
   return false
 end
 
-local function fetch_rules()
-  local api_url = os.getenv("ARXIGNIS_API_URL")
-  local api_key = os.getenv("ARXIGNIS_API_KEY")
-
-  if not api_url or api_url == "" then
-    logger.warn("ARXIGNIS_API_URL not set; access rules disabled")
+local function fetch_rules(resolve)
+  if not env.ARXIGNIS_API_URL or env.ARXIGNIS_API_URL == "" then
+    logger.error("ARXIGNIS_API_URL not set; access rules disabled")
     return nil, "missing_api_url"
   end
 
-  local url = api_url .. "/v1/access-rules?resolve=true&limit=1000&page=1"
+  local url = env.ARXIGNIS_API_URL .. "/access-rules/" .. rule_id .. "?resolve=" .. tostring(resolve)
   local timeout = 2000
-  local ssl_verify = true
+  local ssl_verify = env.ARXIGNIS_API_SSL_VERIFY or true
 
-  local res, err = utils.get_http_request(url, timeout, api_key, ssl_verify)
+  local res, err = utils.get_http_request(url, timeout, env.ARXIGNIS_API_KEY, ssl_verify)
   if err then
     return nil, err
   end
@@ -133,43 +154,28 @@ local function fetch_rules()
   end
 
   local normalized = normalize_rules(decoded.data)
-
-  -- If resolve=true yields no usable IP ranges (e.g., GeoIP data unavailable),
-  -- fallback to resolve=false to at least honor explicit IP lists.
-  if not has_any_ip_ranges(normalized) then
-    logger.warn("Resolved access rules contained no IP ranges; falling back to resolve=false")
-    local url_unresolved = api_url .. "/v1/access-rules?resolve=false&limit=1000&page=1"
-    local res2, err2 = utils.get_http_request(url_unresolved, timeout, api_key, ssl_verify)
-    if not err2 and res2 and res2.status == 200 and res2.body then
-      local ok2, decoded2 = pcall(cjson.decode, res2.body)
-      if ok2 and decoded2 and decoded2.success then
-        local normalized2 = normalize_rules(decoded2.data)
-        return normalized2, nil
-      end
-    end
-  end
-
+  logger.debug("Normalized rules: " .. require("cjson").encode(normalized))
   return normalized, nil
 end
 
 -- Public: for compatibility with tests using get_access_rules()
-function access_rules.get_access_rules()
+function access_rules.get_access_rules(resolve)
   local function loader()
-    local rules, err = fetch_rules()
+    local rules, err = fetch_rules(resolve)
     if not rules then
       logger.warn("Failed to fetch access rules", { error = tostring(err) })
-      return {}
+      return nil
     end
     return rules
   end
 
   if _G.arxignis_cache and _G.arxignis_cache.get then
-    local cache_key = "access_rules_resolved"
-    local rules, err, hit = _G.arxignis_cache:get(cache_key, nil, loader)
+    local cache_key = "access_rules:" .. rule_id
+    local rules, err, hit = _G.arxignis_cache:get(cache_key, nil, loader, { ttl = 300, negative_ttl = 30 })
     if err then
       logger.warn("mlcache error while loading access rules", { error = tostring(err) })
     end
-    ngx.log(ngx.DEBUG, "access_rules cache hit_level: " .. tostring(hit))
+    logger.debug("access_rules cache hit_level: " .. tostring(hit))
     return rules, err
   else
     return loader()
@@ -177,9 +183,37 @@ function access_rules.get_access_rules()
 end
 
 -- Public: used by remediation.lua
-function access_rules.get()
-  local rules = access_rules.get_access_rules()
-  return rules
+function access_rules.check(ipaddress, country, asn)
+
+  local resolve = true
+  if country and country ~= "" and asn and asn ~= "" then
+    resolve = false
+  end
+
+  local rules = access_rules.get_access_rules(resolve)
+  if rules and rules ~= nil then
+    local rule_result = access_rules.evaluate(ipaddress, country, asn, rules, resolve)
+    if rule_result then
+      logger.info("Access rule match found for IP", {
+        ip_address = ipaddress,
+        action = rule_result.action,
+        ruleId = rule_result.ruleId
+      })
+
+      -- Create response from rule result
+      local response = {
+        success = true,
+        access_rules = {
+          ip = ipaddress,
+          ruleId = rule_result.ruleId,
+          action = rule_result.action,
+          expired = rule_result.expired or 600
+        }
+      }
+
+      return response
+    end
+  end
 end
 
 -- Check if IP matches a list of CIDRs/IPs (IPv4)
@@ -195,26 +229,88 @@ local function ip_matches_any(ip, cidrs)
   return false
 end
 
+-- Check if country/ASN matches any in the rule's allow/block lists
+local function country_asn_matches(rule, country, asn, is_allow)
+  logger.debug("Country/ASN matches called with country: " .. country .. ", asn: " .. asn .. ", is_allow: " .. tostring(is_allow))
+  local target = is_allow and rule.allow or rule.block
+  if not target then
+    return false
+  end
+
+  -- Check country match
+  if country and country ~= "" and type(target.country) == "table" then
+    for _, country_code in ipairs(target.country) do
+      if country_code == country then
+        return true
+      end
+    end
+  end
+
+  -- Check ASN match
+  if asn and asn ~= "" and type(target.asn) == "table" then
+    for _, asn_code in ipairs(target.asn) do
+      if asn_code == asn then
+        return true
+      end
+    end
+  end
+
+  return false
+end
+
 -- Evaluate IP against normalized rules
 -- Returns { action = "block"|"allow", ruleId = <id>, expired = <ttl> } or nil
-function access_rules.evaluate(ip, rules)
+function access_rules.evaluate(ip, country, asn, rules, resolve)
+  logger.debug("Evaluate called with ip: " .. " resolve: " .. tostring(resolve) .. " rules: " .. require("cjson").encode(rules))
+
+  if has_any_ip_ranges(rules) then
+    logger.debug("Has any IP ranges")
+  else
+    logger.debug("No IP ranges")
+  end
+
   if not ip or ip == "" then
+    logger.debug("IP is nil or empty")
     return nil
   end
   if type(rules) ~= "table" then
+    logger.debug("Rules is not a table")
     return nil
   end
 
   -- Precedence: block overrides allow; first match wins
   for _, rule in ipairs(rules) do
-    if ip_matches_any(ip, rule.block_ips) then
+    local block_match = false
+    local allow_match = false
+
+    if resolve == false and (country or asn) then
+      -- When resolve=false, check country/ASN directly from original rule data
+      -- We need to get the original rule data for this
+      block_match = country_asn_matches(rule, country, asn, false)
+      allow_match = country_asn_matches(rule, country, asn, true)
+    else
+      -- When resolve=true or no country/ASN, check resolved IP ranges
+      block_match = ip_matches_any(ip, rule.block_ips)
+      allow_match = ip_matches_any(ip, rule.allow_ips)
+    end
+
+    -- Check block rules first
+    if block_match then
+      local metrics_data = {
+        clientIp = ip,
+        decision = "block",
+        ruleId = rule.id,
+        source = "access_rules"
+      }
+      metrics.metrics(env, metrics_data)
       return { action = "block", ruleId = rule.id, expired = 600 }
     end
-    if ip_matches_any(ip, rule.allow_ips) then
+
+    -- Check allow rules
+    if allow_match then
       return { action = "allow", ruleId = rule.id, expired = 600 }
     end
   end
-
   return nil
 end
 
