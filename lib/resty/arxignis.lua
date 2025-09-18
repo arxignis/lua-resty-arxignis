@@ -170,6 +170,7 @@ function arxignis.remediate(ipaddress, country, asn)
       return true
   end
 
+  
   local rules = access_rules.check(ipaddress, country, asn)
   if rules and rules.access_rules and rules.access_rules.action == "block" then
       if mode == "monitor" then

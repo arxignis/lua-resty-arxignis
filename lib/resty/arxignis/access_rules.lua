@@ -23,6 +23,9 @@ if not rule_id or rule_id == "" then
   function access_rules.evaluate(_, _)
     return nil
   end
+  function access_rules.check(_, _, _)
+    return nil
+  end
   return access_rules
 end
 
@@ -184,7 +187,6 @@ end
 
 -- Public: used by remediation.lua
 function access_rules.check(ipaddress, country, asn)
-
   local resolve = true
   if country and country ~= "" and asn and asn ~= "" then
     resolve = false
