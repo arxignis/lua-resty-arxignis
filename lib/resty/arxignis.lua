@@ -1,9 +1,9 @@
 local arxignis = {_TYPE='module', _NAME='arxignis', _VERSION='1.0-0'}
 local logger = require("resty.arxignis.logger")
 local access_rules = require("resty.arxignis.access_rules")
-local remediation = require("resty.arxignis.remediation")
 local utils = require("resty.arxignis.utils")
 local captcha = require("resty.arxignis.captcha")
+local threat = require("resty.arxignis.threat")
 
 -- Environment variable validation
 local function validate_environment()
@@ -216,24 +216,24 @@ function arxignis.remediate(ipaddress, country, asn)
     end
   end
 
-  local remediation_response = remediation.get(ipaddress, mode)
-  -- Validate remediation response
-  if not remediation_response then
-    logger.warn("No remediation response received for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if remediation fails
+  local threat_response = threat.get(ipaddress, mode)
+  -- Validate threat response
+  if not threat_response then
+    logger.warn("No threat response received for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if threat fails
   end
 
-  if not remediation_response.remediation then
-    logger.warn("Invalid remediation response structure for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if remediation response is invalid
+  if not threat_response.intel then
+    logger.warn("Invalid threat response structure for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if threat response is invalid
   end
 
-  if not remediation_response.remediation.action then
-    logger.warn("Missing action in remediation response for IP", {ip_address = ipaddress})
+  if not threat_response.advice then
+    logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
     return true -- Allow request to proceed if action is missing
   end
 
-  if remediation_response.remediation.action == "block" then
+  if threat_response.advice == "block" then
     if mode == "monitor" then
       logger.warn("Arxignis is running in monitor mode: request allowed to proceed, but it would have been blocked under enforcement mode.")
       return true
@@ -246,7 +246,7 @@ function arxignis.remediate(ipaddress, country, asn)
     ngx.exit(utils.http_status_codes[403])
   end
 
-  if remediation_response.remediation.action == "captcha" then
+  if threat_response.advice == "challenge" then
 
     if mode == "monitor" then
       logger.warn("Arxignis is running in monitor mode: request allowed to proceed, but it would have been challenged under enforcement mode.")
@@ -260,7 +260,7 @@ function arxignis.remediate(ipaddress, country, asn)
     local captcha_template_path = cache:get("ARXIGNIS_CAPTCHA_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/captcha.html"
     -- Check if captcha is properly configured
     if not secret_key or not site_key then
-      logger.warn("Captcha not configured, skipping captcha challenge", {
+      logger.error("Captcha not configured, skipping captcha challenge", {
         has_secret_key = secret_key ~= nil,
         has_site_key = site_key ~= nil
       })
@@ -339,7 +339,7 @@ function arxignis.remediate(ipaddress, country, asn)
     end
   end
 
-  if remediation_response.remediation.action == "none" then
+  if threat_response.advice == "none" then
     return true
   end
 end

@@ -74,6 +74,7 @@ local function log_internal(level, message, fields)
     elseif level == "warn" then nginx_level = ngx.WARN
     elseif level == "notice" then nginx_level = ngx.NOTICE
     elseif level == "info" then nginx_level = ngx.INFO
+    elseif level == "debug" then nginx_level = ngx.INFO
     else nginx_level = ngx.INFO
     end
 
@@ -107,6 +108,10 @@ end
 
 function logger.info(message, fields)
     return log_internal("info", message, fields)
+end
+
+function logger.debug(message, fields)
+    return log_internal("debug", message, fields)
 end
 
 -- Convenience function for security events
