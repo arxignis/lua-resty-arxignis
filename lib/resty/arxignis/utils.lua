@@ -1,5 +1,5 @@
 local ok_http, http = pcall(require, "resty.http")
-local bit = require "bit"
+local ipinsubnet = require "resty.arxignis.ipinsubnet"
 
 local utils = {_TYPE='module', _NAME='arxignis.utils', _VERSION='1.0-0'}
 
@@ -243,39 +243,8 @@ end
 
 -- Check if IP is within a CIDR range
 function utils.is_ip_in_cidr(ip, cidr)
-  if not ip or not cidr then
-    return false
-  end
-
-  -- Parse the CIDR range
-  local network, bits = cidr:match("([^/]+)/(%d+)")
-  if not network then
-    -- Handle single IP (without CIDR notation)
-    return ip == cidr
-  end
-
-  bits = tonumber(bits)
-  if not bits then
-    return false
-  end
-
-  -- Convert IP and network to numbers for comparison
-  local function ip_to_number(ip_str)
-    local num = 0
-    for part in ip_str:gmatch("%d+") do
-      num = num * 256 + tonumber(part)
-    end
-    return num
-  end
-
-  local ip_num = ip_to_number(ip)
-  local network_num = ip_to_number(network)
-
-  -- Calculate network mask
-  local mask = bit.bnot(2^(32 - bits) - 1)
-  
-  -- Check if IP is in the network
-  return bit.band(ip_num, mask) == bit.band(network_num, mask)
+  ipinsubnet:addSubnet(cidr)
+  return ipinsubnet:isInSubnetsStrict(ip)
 end
 
 function utils.split_on_delimiter(str, delimiter)
