@@ -192,6 +192,11 @@ function filter:send(event, opts)
     return nil, "failed to encode filter event: " .. tostring(encode_err)
   end
 
+  local method = "POST"
+  if opts.method and opts.method ~= "" then
+    method = tostring(opts.method):upper()
+  end
+
   local timeout = opts.timeout or self.timeout
   local query_args = {
     ["idempotency-key"] = idempotency_key,
@@ -237,7 +242,7 @@ function filter:send(event, opts)
       http_requester:set_timeout(timeout)
     end
     local res, request_err = http_requester:request_uri(url, {
-      method = "POST",
+      method = method,
       body = payload,
       headers = headers,
       ssl_verify = ssl_verify,
@@ -260,7 +265,7 @@ function filter:send(event, opts)
   end
 
   local res, err = utils.http_request(url, {
-    method = "POST",
+    method = method,
     timeout = timeout,
     headers = headers,
     body = payload,
