@@ -1,5 +1,6 @@
 local cjson = require "cjson"
 local utils = require "resty.arxignis.utils"
+local filter_module = require "resty.arxignis.filter"
 
 local worker = {_TYPE='module', _NAME='arxignis.worker', _VERSION='1.0-0'}
 
@@ -13,6 +14,8 @@ local API_GLOBAL_URL = 'https://api.arxignis.com/v1'
 local SHARED_DICT_NAME = "arxignis_queue"
 local BATCH_SIZE = 100
 local FLUSH_INTERVAL = 5  -- seconds
+local FILTER_QUEUE_KEY = "current_filter_queue"
+local FILTER_BATCH_SIZE = 20
 
 local function get_lock(lock_key, interval)
     local dict = ngx.shared.arxignis_queue
@@ -75,6 +78,112 @@ local function make_batch_api_request(env, entries, endpoint)
         ngx.log(ngx.DEBUG, "Batch API request successful, status: " .. (res.status or "unknown"))
     end
 end
+
+local function decode_queue(dict, key)
+    local raw = dict:get(key)
+    if not raw or raw == '' then
+        return {}
+    end
+
+    local ok, value = pcall(cjson.decode, raw)
+    if not ok or type(value) ~= 'table' then
+        ngx.log(ngx.WARN, "Arxignis worker: failed to decode queue for key " .. key .. ": " .. (value or 'unknown'))
+        dict:set(key, '')
+        return {}
+    end
+
+    return value
+end
+
+local function encode_queue(dict, key, queue)
+    if not queue or #queue == 0 then
+        dict:set(key, '')
+        return true
+    end
+
+    local ok, encoded = pcall(cjson.encode, queue)
+    if not ok then
+        ngx.log(ngx.ERR, "Arxignis worker: failed to encode queue for key " .. key .. ": " .. (encoded or 'unknown'))
+        return false
+    end
+
+    dict:set(key, encoded)
+    return true
+end
+
+local function build_filter_client(env, overrides)
+    overrides = overrides or {}
+    return filter_module.new({
+        api_url = overrides.api_url or env.ARXIGNIS_API_URL,
+        api_key = overrides.api_key or env.ARXIGNIS_API_KEY,
+        timeout = overrides.timeout,
+        ssl_verify = overrides.ssl_verify,
+        http_client_factory = overrides.http_client_factory,
+    })
+end
+
+function worker.enqueue_filter_event(env, event, opts)
+    opts = opts or {}
+
+    if type(event) ~= 'table' then
+        ngx.log(ngx.ERR, 'Arxignis worker: expected event table but received ' .. type(event))
+        return nil, 'event must be a table'
+    end
+
+    local dict = ngx.shared[SHARED_DICT_NAME]
+    if not dict then
+        ngx.log(ngx.ERR, "Shared dict '" .. SHARED_DICT_NAME .. "' not found")
+        return nil, 'shared dict not available'
+    end
+
+    local queue = decode_queue(dict, FILTER_QUEUE_KEY)
+    queue[#queue + 1] = {
+        event = event,
+        opts = opts,
+    }
+
+    encode_queue(dict, FILTER_QUEUE_KEY, queue)
+
+    if #queue >= FILTER_BATCH_SIZE then
+        ngx.log(ngx.DEBUG, 'Arxignis worker: filter queue reached ' .. #queue .. ' entries, flushing early')
+        process_filter_queue(env, dict)
+    end
+
+    return true
+end
+
+local function process_filter_queue(env, dict)
+    local queue = decode_queue(dict, FILTER_QUEUE_KEY)
+    if #queue == 0 then
+        return
+    end
+
+    local client = build_filter_client(env)
+    local success_count = 0
+    local remaining = nil
+
+    for idx, item in ipairs(queue) do
+        local result, err = client:send(item.event, item.opts)
+        if not result then
+            ngx.log(ngx.ERR, "Arxignis worker: filter send failed: " .. (err or 'unknown error'))
+            remaining = {}
+            for j = idx, #queue do
+                table.insert(remaining, queue[j])
+            end
+            break
+        end
+        success_count = success_count + 1
+    end
+
+    if remaining then
+        encode_queue(dict, FILTER_QUEUE_KEY, remaining)
+    else
+        dict:set(FILTER_QUEUE_KEY, '')
+    end
+
+    ngx.log(ngx.DEBUG, "Arxignis worker: processed " .. success_count .. " filter events")
+end
+
 
 function worker.add_log_to_batch(env, log_entry)
     local dict = ngx.shared[SHARED_DICT_NAME]
@@ -200,6 +309,33 @@ function worker.add_metrics_to_batch(env, metrics_entry)
         end
     end
 end
+
+local function flush_filter_timer(premature, env)
+    if premature then
+        ngx.log(ngx.DEBUG, 'Arxignis filter flush timer firing prematurely, exiting')
+        return
+    end
+
+    local dict = ngx.shared[SHARED_DICT_NAME]
+    if not dict then
+        ngx.log(ngx.ERR, "Shared dict '" .. SHARED_DICT_NAME .. "' not found, cannot flush filter queue")
+        return
+    end
+
+    local lock_acquired = get_lock('arxignis_filter_flush', FLUSH_INTERVAL)
+    if not lock_acquired then
+        ngx.log(ngx.DEBUG, 'Arxignis filter flush skipped, another worker holds the lock')
+        return
+    end
+
+    process_filter_queue(env, dict)
+
+    local ok, err = ngx.timer.at(FLUSH_INTERVAL, flush_filter_timer, env)
+    if not ok then
+        ngx.log(ngx.ERR, "Failed to reschedule filter flush timer: " .. (err or "unknown error"))
+    end
+end
+
 
 -- Timer callback function to flush logs
 local function flush_logs_timer(premature, env)
@@ -338,6 +474,14 @@ function worker.start_flush_timers(env)
     else
         ngx.log(ngx.DEBUG, "Metrics flush timer started successfully for worker " .. ngx.worker.id())
     end
+
+    -- Start the filter timer
+    local ok3, err3 = ngx.timer.at(FLUSH_INTERVAL, flush_filter_timer, env)
+    if not ok3 then
+        ngx.log(ngx.ERR, "Failed to start filter flush timer: " .. (err3 or "unknown error"))
+    else
+        ngx.log(ngx.DEBUG, "Filter flush timer started successfully for worker " .. ngx.worker.id())
+    end
 end
 
 -- Function to flush remaining logs (call this in worker shutdown)
@@ -361,6 +505,15 @@ function worker.flush_remaining_logs(env)
 end
 
 -- Function to flush remaining metrics (call this in worker shutdown)
+function worker.flush_remaining_filters(env)
+    local dict = ngx.shared[SHARED_DICT_NAME]
+    if not dict then
+        return
+    end
+
+    process_filter_queue(env, dict)
+end
+
 function worker.flush_remaining_metrics(env)
     local dict = ngx.shared[SHARED_DICT_NAME]
     if not dict then
