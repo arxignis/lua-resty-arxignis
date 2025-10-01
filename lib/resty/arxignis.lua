@@ -4,6 +4,8 @@ local access_rules = require("resty.arxignis.access_rules")
 local utils = require("resty.arxignis.utils")
 local captcha = require("resty.arxignis.captcha")
 local threat = require("resty.arxignis.threat")
+local filter_module = require("resty.arxignis.filter")
+local worker = require("resty.arxignis.worker")
 
 -- Environment variable validation
 local function validate_environment()
@@ -47,6 +49,60 @@ local mode = os.getenv("ARXIGNIS_MODE")
 if mode ~= "block" then
     mode = "monitor"
     logger.warn("ARXIGNIS_MODE is not set, defaulting to monitor mode")
+end
+
+local function get_cached_or_env(cache, key)
+    if cache then
+        local value = cache:get(key)
+        if value then
+            return value
+        end
+    end
+    return os.getenv(key)
+end
+
+local function queue_filter_analysis(cache, threat_response, current_mode)
+    local additional = {
+        remediation = threat_response and threat_response.advice or "unknown",
+        threat_score = threat_response and threat_response.intel and threat_response.intel.score or nil,
+        threat_rule = threat_response and threat_response.intel and threat_response.intel.rule_id or nil,
+        mode = current_mode,
+    }
+
+    local ok, event_or_err = pcall(filter_module.build_event_from_request, {
+        tenant_id = get_cached_or_env(cache, "ARXIGNIS_TENANT_ID"),
+        additional = additional,
+    })
+
+    if not ok then
+        logger.error("Failed to build Arxignis filter event", { error = event_or_err })
+        return nil, event_or_err
+    end
+
+    local event = event_or_err
+    local headers = ngx.req.get_headers() or {}
+    local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
+    if not raw_key or raw_key == "" then
+        raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
+    end
+    local idempotency_key = ngx.md5(raw_key)
+
+    local env = {
+        ARXIGNIS_API_URL = os.getenv("ARXIGNIS_API_URL"),
+        ARXIGNIS_API_KEY = os.getenv("ARXIGNIS_API_KEY"),
+    }
+
+    local ok_enqueue, enqueue_err = worker.enqueue_filter_event(env, event, {
+        idempotency_key = idempotency_key,
+        original_event = false,
+    })
+
+    if not ok_enqueue then
+        logger.error("Failed to enqueue Arxignis filter event", { error = enqueue_err })
+        return nil, enqueue_err
+    end
+
+    return true
 end
 
 -- Helper function to generate secure captcha token
@@ -232,6 +288,11 @@ function arxignis.remediate(ipaddress, country, asn)
   if not threat_response.advice then
     logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
     return true -- Allow request to proceed if action is missing
+  end
+
+  local _, filter_err = queue_filter_analysis(cache, threat_response, mode)
+  if filter_err then
+    logger.warn("Failed to queue filter analysis", { error = filter_err })
   end
 
   if threat_response.advice == "block" then
