@@ -274,6 +274,7 @@ function arxignis.remediate(ipaddress, country, asn)
   end
 
   local threat_response = threat.get(ipaddress, mode)
+  logger.info("Arxignis threat response raw", threat_response)
   -- Validate threat response
   if not threat_response then
     logger.warn("No threat response received for IP", {ip_address = ipaddress})
