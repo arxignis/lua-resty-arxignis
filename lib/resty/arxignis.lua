@@ -50,16 +50,6 @@ if mode ~= "block" then
     logger.warn("ARXIGNIS_MODE is not set, defaulting to monitor mode")
 end
 
-local function get_cached_or_env(cache, key)
-    if cache then
-        local value = cache:get(key)
-        if value then
-            return value
-        end
-    end
-    return os.getenv(key)
-end
-
 -- Helper function to generate secure captcha token
 local function generate_captcha_token(ipaddress, ja4)
   -- Generate a cryptographically secure random token
@@ -228,7 +218,6 @@ function arxignis.remediate(ipaddress, country, asn)
   end
 
   local threat_response = threat.get(ipaddress, mode)
-  logger.info("Arxignis threat response raw", threat_response)
   -- Validate threat response
   if not threat_response then
     logger.warn("No threat response received for IP", {ip_address = ipaddress})
@@ -360,7 +349,7 @@ function arxignis.remediate(ipaddress, country, asn)
   }
 
   local ok_event, event_or_err = pcall(filter_module.build_event_from_request, {
-    tenant_id = get_cached_or_env(cache, "ARXIGNIS_TENANT_ID"),
+    tenant_id = os.getenv("ARXIGNIS_TENANT_ID"),
     additional = additional,
   })
 
@@ -383,8 +372,8 @@ function arxignis.remediate(ipaddress, country, asn)
     local idempotency_key = ngx.md5(raw_key)
 
     local filter_client = filter_module.new({
-      api_url = get_cached_or_env(cache, "ARXIGNIS_API_URL"),
-      api_key = get_cached_or_env(cache, "ARXIGNIS_API_KEY"),
+      api_url = os.getenv("ARXIGNIS_API_URL"),
+      api_key = os.getenv("ARXIGNIS_API_KEY"),
       ssl_verify = true,
     })
 
