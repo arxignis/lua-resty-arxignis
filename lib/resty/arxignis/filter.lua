@@ -59,7 +59,9 @@ local function read_request_body()
     return nil
   end
 
-  local ok, err = pcall(ngx.req.read_body, ngx.req)
+  local ok, err = pcall(function()
+    ngx.req.read_body()
+  end)
   if not ok then
     if ngx.log then
       ngx.log(ngx.WARN, "Arxignis filter: failed to read request body: ", tostring(err))
@@ -126,7 +128,14 @@ function filter.build_event_from_request(opts)
   local path = ngx.var and ngx.var.uri or nil
   local query = ngx.var and ngx.var.args or nil
   local scheme = ngx.var and ngx.var.scheme or nil
-  local host = headers["host"] or (ngx.var and ngx.var.host) or nil
+  local host_header = headers["host"] or headers["Host"] or (ngx.var and ngx.var.host) or nil
+  local host = host_header
+  if host and type(host) == "string" then
+    local colon_index = host:find(":", 1, true)
+    if colon_index then
+      host = host:sub(1, colon_index - 1)
+    end
+  end
   local remote_ip = ngx.var and ngx.var.remote_addr or nil
   local port = ngx.var and tonumber(ngx.var.server_port) or nil
   local request_id = opts.request_id or (ngx.var and (ngx.var.request_id or ngx.var.req_id)) or nil
@@ -162,7 +171,7 @@ function filter.build_event_from_request(opts)
   local event = {
     event_type = opts.event_type or DEFAULT_EVENT_TYPE,
     schema_version = opts.schema_version or DEFAULT_SCHEMA_VERSION,
-    timestamp = opts.timestamp or (ngx.utctime and ngx.utctime()) or nil,
+    timestamp = opts.timestamp or os.date("!%Y-%m-%dT%H:%M:%SZ", ngx.now and ngx.now() or os.time()),
     request_id = request_id,
     tenant_id = opts.tenant_id,
     http = http_section,
@@ -225,6 +234,36 @@ function filter:send(event, opts)
     for key, value in pairs(opts.headers) do
       headers[key] = value
     end
+  end
+
+  if ngx and ngx.log then
+    local sanitized_headers = {}
+    for key, value in pairs(headers) do
+      if type(key) == "string" and key:lower() == "authorization" then
+        sanitized_headers[key] = "***"
+      else
+        sanitized_headers[key] = value
+      end
+    end
+
+    local headers_json = cjson.encode(sanitized_headers)
+    local body_b64
+    if event and event.http and event.http.body and ngx.encode_base64 then
+      body_b64 = ngx.encode_base64(event.http.body)
+    end
+
+    ngx.log(
+      ngx.INFO,
+      "Arxignis filter outbound request: method=",
+      method,
+      " url=",
+      url,
+      " headers=",
+      headers_json,
+      " payload=",
+      payload,
+      body_b64 and (" body_b64=" .. body_b64) or ""
+    )
   end
 
   local ssl_verify = opts.ssl_verify

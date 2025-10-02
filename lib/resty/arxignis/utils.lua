@@ -1,5 +1,6 @@
 local ok_http, http = pcall(require, "resty.http")
-local ipinsubnet = require "resty.arxignis.ipinsubnet"
+local ipinsubnet_module = require "resty.arxignis.ipinsubnet"
+local ipinsubnet = ipinsubnet_module:new()
 
 local utils = {_TYPE='module', _NAME='arxignis.utils', _VERSION='1.0-0'}
 

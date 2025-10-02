@@ -5,7 +5,6 @@ local utils = require("resty.arxignis.utils")
 local captcha = require("resty.arxignis.captcha")
 local threat = require("resty.arxignis.threat")
 local filter_module = require("resty.arxignis.filter")
-local worker = require("resty.arxignis.worker")
 
 -- Environment variable validation
 local function validate_environment()
@@ -59,50 +58,6 @@ local function get_cached_or_env(cache, key)
         end
     end
     return os.getenv(key)
-end
-
-local function queue_filter_analysis(cache, threat_response, current_mode)
-    local additional = {
-        remediation = threat_response and threat_response.advice or "unknown",
-        threat_score = threat_response and threat_response.intel and threat_response.intel.score or nil,
-        threat_rule = threat_response and threat_response.intel and threat_response.intel.rule_id or nil,
-        mode = current_mode,
-    }
-
-    local ok, event_or_err = pcall(filter_module.build_event_from_request, {
-        tenant_id = get_cached_or_env(cache, "ARXIGNIS_TENANT_ID"),
-        additional = additional,
-    })
-
-    if not ok then
-        logger.error("Failed to build Arxignis filter event", { error = event_or_err })
-        return nil, event_or_err
-    end
-
-    local event = event_or_err
-    local headers = ngx.req.get_headers() or {}
-    local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
-    if not raw_key or raw_key == "" then
-        raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
-    end
-    local idempotency_key = ngx.md5(raw_key)
-
-    local env = {
-        ARXIGNIS_API_URL = os.getenv("ARXIGNIS_API_URL"),
-        ARXIGNIS_API_KEY = os.getenv("ARXIGNIS_API_KEY"),
-    }
-
-    local ok_enqueue, enqueue_err = worker.enqueue_filter_event(env, event, {
-        idempotency_key = idempotency_key,
-        original_event = false,
-    })
-
-    if not ok_enqueue then
-        logger.error("Failed to enqueue Arxignis filter event", { error = enqueue_err })
-        return nil, enqueue_err
-    end
-
-    return true
 end
 
 -- Helper function to generate secure captcha token
@@ -239,9 +194,8 @@ function arxignis.remediate(ipaddress, country, asn)
       ngx.header.content_type = "text/html"
       ngx.say(block_template)
       ngx.exit(utils.http_status_codes[403])
-    else if rules and rules.access_rules and rules.access_rules.action == "allow" then
-        return true
-    end
+  elseif rules and rules.access_rules and rules.access_rules.action == "allow" then
+      return true
   end
 
   -- Check if this is an SSL/TLS request
@@ -289,11 +243,6 @@ function arxignis.remediate(ipaddress, country, asn)
   if not threat_response.advice then
     logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
     return true -- Allow request to proceed if action is missing
-  end
-
-  local _, filter_err = queue_filter_analysis(cache, threat_response, mode)
-  if filter_err then
-    logger.warn("Failed to queue filter analysis", { error = filter_err })
   end
 
   if threat_response.advice == "block" then
@@ -402,9 +351,65 @@ function arxignis.remediate(ipaddress, country, asn)
     end
   end
 
-  if threat_response.advice == "none" then
+  -- Run filter analysis only after remediation has allowed request to continue
+  local additional = {
+    remediation = threat_response and threat_response.advice or "unknown",
+    threat_score = threat_response and threat_response.intel and threat_response.intel.score or nil,
+    threat_rule = threat_response and threat_response.intel and threat_response.intel.rule_id or nil,
+    mode = mode,
+  }
+
+  local ok_event, event_or_err = pcall(filter_module.build_event_from_request, {
+    tenant_id = get_cached_or_env(cache, "ARXIGNIS_TENANT_ID"),
+    additional = additional,
+  })
+
+  if not ok_event then
+    logger.error("Failed to build Arxignis filter event", { error = event_or_err })
     return true
   end
+
+  local filter_event = event_or_err
+  if (not filter_event.tenant_id or filter_event.tenant_id == "") and threat_response and threat_response.tenant_id then
+    filter_event.tenant_id = threat_response.tenant_id
+  end
+
+  if filter_event.http and filter_event.http.body and filter_event.http.body ~= "" then
+    local headers = ngx.req.get_headers() or {}
+    local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
+    if not raw_key or raw_key == "" then
+      raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
+    end
+    local idempotency_key = ngx.md5(raw_key)
+
+    local filter_client = filter_module.new({
+      api_url = get_cached_or_env(cache, "ARXIGNIS_API_URL"),
+      api_key = get_cached_or_env(cache, "ARXIGNIS_API_KEY"),
+      ssl_verify = true,
+    })
+
+    local filter_response, filter_err = filter_client:send(filter_event, {
+      idempotency_key = idempotency_key,
+      original_event = false,
+    })
+
+    if not filter_response then
+      logger.warn("Filter analysis failed", { error = filter_err })
+    elseif filter_response.json and filter_response.json.action == "block" then
+      if mode == "monitor" then
+        logger.warn("Arxignis filter would block request in block mode", { filter_response = filter_response.json })
+      else
+        local block_template_path = cache:get("ARXIGNIS_BLOCK_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/block.html"
+        local block_template = utils.read_file(block_template_path)
+        ngx.status = utils.http_status_codes[403]
+        ngx.header.content_type = "text/html"
+        ngx.say(block_template)
+        ngx.exit(utils.http_status_codes[403])
+      end
+    end
+  end
+
+  return true
 end
 
 return arxignis
