@@ -53,10 +53,8 @@ local function read_request_body()
 
     local ok, err = pcall(function() ngx.req.read_body() end)
     if not ok then
-        if ngx.log then
-            ngx.log(ngx.WARN, "Arxignis filter: failed to read request body: ",
+            logger.warn("Arxignis filter: failed to read request body: ",
                     tostring(err))
-        end
         return nil
     end
 
@@ -68,11 +66,8 @@ local function read_request_body()
 
     local file, open_err = io_open(file_path, "rb")
     if not file then
-        if ngx.log then
-            ngx.log(ngx.WARN,
-                    "Arxignis filter: unable to read temp body file: ",
+        logger.warn("Arxignis filter: unable to read temp body file: ",
                     tostring(open_err))
-        end
         return nil
     end
 
@@ -333,13 +328,8 @@ function filter:send_cached(event, opts)
         return self:send(event, opts)
     end
 
-    -- Log cache hit level
-    if ngx and ngx.log then
-        ngx.log(ngx.DEBUG, "Filter cache hit level: " .. (hit_level or "unknown"))
-    end
-
     -- Log successful cached response
-    logger.info("Filter response from cache", {
+    logger.debug("Filter response from cache", {
         idempotency_key = idempotency_key,
         status = cached_response.status or "unknown",
         cache_hit_level = hit_level or "unknown"
