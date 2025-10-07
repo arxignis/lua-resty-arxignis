@@ -4,6 +4,8 @@ local access_rules = require("resty.arxignis.access_rules")
 local utils = require("resty.arxignis.utils")
 local captcha = require("resty.arxignis.captcha")
 local threat = require("resty.arxignis.threat")
+local filter_module = require("resty.arxignis.filter")
+local ngx = ngx
 
 -- Environment variable validation
 local function validate_environment()
@@ -170,7 +172,7 @@ function arxignis.remediate(ipaddress, country, asn)
       return true
   end
 
-  
+
   local rules = access_rules.check(ipaddress, country, asn)
   if rules and rules.access_rules and rules.access_rules.action == "block" then
       if mode == "monitor" then
@@ -183,9 +185,8 @@ function arxignis.remediate(ipaddress, country, asn)
       ngx.header.content_type = "text/html"
       ngx.say(block_template)
       ngx.exit(utils.http_status_codes[403])
-    else if rules and rules.access_rules and rules.access_rules.action == "allow" then
-        return true
-    end
+  elseif rules and rules.access_rules and rules.access_rules.action == "allow" then
+      return true
   end
 
   -- Check if this is an SSL/TLS request
@@ -196,25 +197,7 @@ function arxignis.remediate(ipaddress, country, asn)
     logger.warn("Not an SSL request - no JA4 data available or JA4 module is not loaded")
     ja4 = "no_ssl"
   elseif ja4 == nil or ja4 == "" then
-    ja4 = "unknown"
-  end
-
-  -- Check for existing captcha token in cookies
-  local cookies = ngx.var.http_cookie
-  logger.debug("Cookie check - cookies: " .. (cookies or "nil") .. ", IP: " .. ipaddress)
-  if cookies then
-    -- Parse cookies more robustly
-    for cookie in cookies:gmatch("ax_captcha=([^;%s]+)") do
-      logger.debug("Found ax_captcha cookie: " .. cookie)
-      -- Verify secure captcha token
-      local token_valid = verify_captcha_token(cookie, ipaddress, ja4)
-      if token_valid then
-        logger.debug("Valid captcha token found, allowing request")
-        return true
-      else
-        logger.debug("Invalid captcha token found, continuing")
-      end
-    end
+    ja4 = ngx.req.get_headers()["AX-JA4"] or "unknown"
   end
 
   local threat_response = threat.get(ipaddress, mode)
@@ -232,6 +215,25 @@ function arxignis.remediate(ipaddress, country, asn)
   if not threat_response.advice then
     logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
     return true -- Allow request to proceed if action is missing
+  end
+
+  -- Check for existing captcha token in cookies
+  local cookies = ngx.var.http_cookie
+  logger.debug("Cookie check - cookies: " .. (cookies or "nil") .. ", IP: " .. ipaddress)
+  if cookies then
+    -- Parse cookies more robustly
+    for cookie in cookies:gmatch("ax_captcha=([^;%s]+)") do
+      logger.debug("Found ax_captcha cookie: " .. cookie)
+      -- Verify secure captcha token
+      local token_valid = verify_captcha_token(cookie, ipaddress, ja4)
+      if token_valid then
+        logger.debug("Valid captcha token found, allowing request to proceed to filter analysis")
+        threat_response.advice = "allow"
+        break
+      else
+        logger.debug("Invalid captcha token found, continuing")
+      end
+    end
   end
 
   if threat_response.advice == "block" then
@@ -259,6 +261,7 @@ function arxignis.remediate(ipaddress, country, asn)
     local site_key = cache:get("ARXIGNIS_CAPTCHA_SITE_KEY")
     local captcha_provider = cache:get("ARXIGNIS_CAPTCHA_PROVIDER")
     local captcha_template_path = cache:get("ARXIGNIS_CAPTCHA_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/captcha.html"
+
     -- Check if captcha is properly configured
     if not secret_key or not site_key then
       logger.error("Captcha not configured, skipping captcha challenge", {
@@ -286,14 +289,14 @@ function arxignis.remediate(ipaddress, country, asn)
       -- First try to get from POST body (for form submissions)
       if ngx.var.request_method == "POST" then
         ngx.req.read_body()
-        local args, err = ngx.req.get_post_args()
+        local args, post_err = ngx.req.get_post_args()
 
-        if args and not err then
+        if args and not post_err then
           -- Try to get captcha response using the proper key
           captcha_response = args["cf-turnstile-response"] or args["g-recaptcha-response"] or args["h-captcha-response"]
           logger.debug("POST body parsing - args: " .. (args and "found" or "nil") .. ", captcha_response: " .. (captcha_response or "nil"))
         else
-          logger.error("Error parsing POST args", {error = err or "unknown"})
+          logger.error("Error parsing POST args", {error = post_err or "unknown"})
         end
       end
 
@@ -316,21 +319,22 @@ function arxignis.remediate(ipaddress, country, asn)
           -- Generate secure captcha token
           local captcha_token = generate_captcha_token(ipaddress, ja4)
 
-          -- Set cookie and redirect to clear captcha state
+          -- Set cookie so future requests bypass the challenge
           local cookie_value = "ax_captcha=" .. captcha_token .. "; Path=/; HttpOnly; SameSite=Strict; Max-Age=7200"
           ngx.header["Set-Cookie"] = cookie_value
           logger.debug("Setting captcha cookie: " .. cookie_value)
-          ngx.redirect(ngx.var.request_uri)
-          return
+          threat_response.advice = "allow"
         else
           -- Captcha validation failed, show error and captcha again
           logger.warn("Captcha validation failed", {error = validation_error or "unknown error"})
           captcha.apply()
+          return true
         end
       else
         -- No captcha response, show the captcha form
         logger.warn("No captcha response, showing captcha form")
         captcha.apply()
+        return true
       end
     else
       ngx.status = utils.http_status_codes[500]
@@ -338,11 +342,97 @@ function arxignis.remediate(ipaddress, country, asn)
       ngx.say("Error loading captcha")
       ngx.exit(utils.http_status_codes[500])
     end
+
+    if threat_response.advice == "challenge" then
+      return true
+    end
   end
 
-  if threat_response.advice == "none" then
+  -- Run filter analysis only after remediation has allowed request to continue
+  local additional = {
+    remediation = threat_response and threat_response.advice or "unknown",
+    threat_score = threat_response and threat_response.intel and threat_response.intel.score or nil,
+    threat_rule = threat_response and threat_response.intel and threat_response.intel.rule_id or nil,
+    mode = mode,
+  }
+
+  local ok_event, event_or_err = pcall(filter_module.build_event_from_request, {
+    tenant_id = os.getenv("ARXIGNIS_TENANT_ID"),
+    additional = additional,
+  })
+
+  if not ok_event then
+    logger.error("Failed to build Arxignis filter event", { error = event_or_err })
     return true
   end
+
+  local filter_event = event_or_err
+
+  -- Generate idempotency key from method|path|body_sha256|host
+  local method = ""
+  local path = ""
+  local body_sha256 = ""
+  local host = ""
+
+  if filter_event and filter_event.http then
+    method = filter_event.http.method or ""
+    path = filter_event.http.path or ""
+    body_sha256 = filter_event.http.body_sha256 or ""
+    host = filter_event.http.host or ""
+  end
+
+  local idempotency_raw = method .. "|" .. path .. "|" .. body_sha256 .. "|" .. host .. "|" .. ipaddress
+  local idempotency_key = utils.compute_sha256(idempotency_raw)
+
+  local filter_client = filter_module.new({
+    api_url = os.getenv("ARXIGNIS_API_URL"),
+    api_key = os.getenv("ARXIGNIS_API_KEY"),
+    ssl_verify = true,
+  })
+
+  local filter_response, filter_err = filter_client:send_cached(filter_event, {
+    idempotency_key = idempotency_key,
+    original_event = false,
+    cache_ttl = 300,
+    cache_negative_ttl = 60,
+  })
+
+  if filter_response then
+    local details = filter_response.json and filter_response.json.details
+    local reason = filter_response.json and filter_response.json.reason
+
+    if details then
+      if details.matched_rule then
+        reason = string.format("Request blocked by WAF rule %s", details.matched_rule)
+      elseif details.virus_detected then
+        reason = "Request blocked due to malware detection"
+      end
+    end
+
+    logger.info("Arxignis filter response", {
+      status = filter_response.status,
+      body = filter_response.body,
+      json = filter_response.json,
+      reason = reason,
+    })
+  elseif filter_err then
+    logger.warn("Filter analysis failed", { error = filter_err })
+  end
+
+  if filter_response and filter_response.json and filter_response.json.action == "block" then
+    if mode == "monitor" then
+      logger.warn("Arxignis filter would block request in block mode", { filter_response = filter_response.json })
+    else
+      local block_template_path = cache:get("ARXIGNIS_BLOCK_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/block.html"
+      local block_template = utils.read_file(block_template_path)
+      ngx.status = utils.http_status_codes[403]
+      ngx.header.content_type = "text/html"
+      ngx.say(block_template)
+      ngx.exit(utils.http_status_codes[403])
+    end
+  end
+
+  return true
 end
 
 return arxignis

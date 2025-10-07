@@ -338,6 +338,7 @@ function worker.start_flush_timers(env)
     else
         ngx.log(ngx.DEBUG, "Metrics flush timer started successfully for worker " .. ngx.worker.id())
     end
+
 end
 
 -- Function to flush remaining logs (call this in worker shutdown)
