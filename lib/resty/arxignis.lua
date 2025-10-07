@@ -171,7 +171,7 @@ function arxignis.remediate(ipaddress, country, asn)
       return true
   end
 
-  
+
   local rules = access_rules.check(ipaddress, country, asn)
   if rules and rules.access_rules and rules.access_rules.action == "block" then
       if mode == "monitor" then
@@ -199,6 +199,23 @@ function arxignis.remediate(ipaddress, country, asn)
     ja4 = "unknown"
   end
 
+  local threat_response = threat.get(ipaddress, mode)
+  -- Validate threat response
+  if not threat_response then
+    logger.warn("No threat response received for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if threat fails
+  end
+
+  if not threat_response.intel then
+    logger.warn("Invalid threat response structure for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if threat response is invalid
+  end
+
+  if not threat_response.advice then
+    logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if action is missing
+  end
+
   -- Check for existing captcha token in cookies
   local cookies = ngx.var.http_cookie
   logger.debug("Cookie check - cookies: " .. (cookies or "nil") .. ", IP: " .. ipaddress)
@@ -216,23 +233,6 @@ function arxignis.remediate(ipaddress, country, asn)
         logger.debug("Invalid captcha token found, continuing")
       end
     end
-  end
-
-  local threat_response = threat.get(ipaddress, mode)
-  -- Validate threat response
-  if not threat_response then
-    logger.warn("No threat response received for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if threat fails
-  end
-
-  if not threat_response.intel then
-    logger.warn("Invalid threat response structure for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if threat response is invalid
-  end
-
-  if not threat_response.advice then
-    logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if action is missing
   end
 
   if threat_response.advice == "block" then
@@ -366,9 +366,6 @@ function arxignis.remediate(ipaddress, country, asn)
   end
 
   local filter_event = event_or_err
-  if (not filter_event.tenant_id or filter_event.tenant_id == "") and threat_response and threat_response.tenant_id then
-    filter_event.tenant_id = threat_response.tenant_id
-  end
 
   local headers = ngx.req.get_headers() or {}
   local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
