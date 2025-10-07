@@ -382,9 +382,29 @@ function arxignis.remediate(ipaddress, country, asn)
       original_event = false,
     })
 
-    if not filter_response then
+    if filter_response then
+      local details = filter_response.json and filter_response.json.details
+      local reason = filter_response.json and filter_response.json.reason
+
+      if details then
+        if details.matched_rule then
+          reason = string.format("Request blocked by WAF rule %s", details.matched_rule)
+        elseif details.virus_detected then
+          reason = "Request blocked due to malware detection"
+        end
+      end
+
+      logger.info("Arxignis filter response", {
+        status = filter_response.status,
+        body = filter_response.body,
+        json = filter_response.json,
+        reason = reason,
+      })
+    elseif filter_err then
       logger.warn("Filter analysis failed", { error = filter_err })
-    elseif filter_response.json and filter_response.json.action == "block" then
+    end
+
+    if filter_response and filter_response.json and filter_response.json.action == "block" then
       if mode == "monitor" then
         logger.warn("Arxignis filter would block request in block mode", { filter_response = filter_response.json })
       else
