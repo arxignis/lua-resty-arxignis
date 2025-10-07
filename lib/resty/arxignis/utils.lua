@@ -1,6 +1,8 @@
 local ok_http, http = pcall(require, "resty.http")
 local ipinsubnet_module = require "resty.arxignis.ipinsubnet"
 local ipinsubnet = ipinsubnet_module:new()
+local resty_sha256 = require "resty.sha256"
+local str = require "resty.string"
 
 local utils = {_TYPE='module', _NAME='arxignis.utils', _VERSION='1.0-0'}
 
@@ -57,6 +59,49 @@ function utils.file_exist(path)
  else
    return false
  end
+end
+
+function utils.compute_sha256(value)
+    if not value or value == "" then return nil end
+
+    local sha256 = resty_sha256:new()
+    sha256:update(value)
+    local digest = sha256:final()
+    return str.to_hex(digest)
+end
+
+-- Normalize JSON body to create consistent hashes
+function utils.normalize_json_body(body)
+    if not body or body == "" then return nil end
+
+    -- Try to parse as JSON
+    local cjson = require "cjson.safe"
+    local parsed, err = cjson.decode(body)
+
+    if not parsed then
+        -- If not JSON, return original body
+        return body
+    end
+
+    -- Normalize JSON by re-encoding with sorted keys
+    local normalized, encode_err = cjson.encode(parsed)
+    if not normalized then
+        -- If encoding fails, return original body
+        return body
+    end
+
+    return normalized
+end
+
+-- Compute persistent body hash that remains consistent for same logical content
+function utils.compute_persistent_body_hash(body)
+    if not body or body == "" then return nil end
+
+    -- Normalize the body content first
+    local normalized_body = utils.normalize_json_body(body)
+
+    -- Compute hash of normalized content
+    return utils.compute_sha256(normalized_body)
 end
 
 function utils.starts_with(str, start)

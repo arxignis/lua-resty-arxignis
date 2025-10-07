@@ -5,6 +5,7 @@ local utils = require("resty.arxignis.utils")
 local captcha = require("resty.arxignis.captcha")
 local threat = require("resty.arxignis.threat")
 local filter_module = require("resty.arxignis.filter")
+local ngx = ngx
 
 -- Environment variable validation
 local function validate_environment()
@@ -367,12 +368,21 @@ function arxignis.remediate(ipaddress, country, asn)
 
   local filter_event = event_or_err
 
-  local headers = ngx.req.get_headers() or {}
-  local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
-  if not raw_key or raw_key == "" then
-    raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
+  -- Generate idempotency key from method|path|body_sha256|host
+  local method = ""
+  local path = ""
+  local body_sha256 = ""
+  local host = ""
+
+  if filter_event and filter_event.http then
+    method = filter_event.http.method or ""
+    path = filter_event.http.path or ""
+    body_sha256 = filter_event.http.body_sha256 or ""
+    host = filter_event.http.host or ""
   end
-  local idempotency_key = ngx.md5(raw_key)
+
+  local idempotency_raw = method .. "|" .. path .. "|" .. body_sha256 .. "|" .. host .. "|" .. ipaddress
+  local idempotency_key = utils.compute_sha256(idempotency_raw)
 
   local filter_client = filter_module.new({
     api_url = os.getenv("ARXIGNIS_API_URL"),
@@ -380,9 +390,11 @@ function arxignis.remediate(ipaddress, country, asn)
     ssl_verify = true,
   })
 
-  local filter_response, filter_err = filter_client:send(filter_event, {
+  local filter_response, filter_err = filter_client:send_cached(filter_event, {
     idempotency_key = idempotency_key,
     original_event = false,
+    cache_ttl = 300,
+    cache_negative_ttl = 60,
   })
 
   if filter_response then

@@ -1,6 +1,7 @@
 local cjson = require "cjson.safe"
 local resty_string = require "resty.string"
 local utils = require "resty.arxignis.utils"
+local logger = require "resty.arxignis.logger"
 
 local ngx = ngx
 local type = type
@@ -39,13 +40,12 @@ end
 
 local function compute_sha256(value)
     if not value or value == "" then return nil end
+    return utils.compute_sha256(value)
+end
 
-    if ngx and ngx.sha256_bin and resty_string and resty_string.to_hex then
-        local digest = ngx.sha256_bin(value)
-        return resty_string.to_hex(digest)
-    end
-
-    return nil
+local function compute_persistent_body_hash(body)
+    if not body or body == "" then return nil end
+    return utils.compute_persistent_body_hash(body)
 end
 
 local function read_request_body()
@@ -139,7 +139,7 @@ function filter.build_event_from_request(opts)
 
     if body then
         http_section.body = body
-        http_section.body_sha256 = compute_sha256(body)
+        http_section.body_sha256 = compute_persistent_body_hash(body)
         http_section.content_length = #body
     else
         local content_length_header = headers["content-length"] or
@@ -225,7 +225,7 @@ function filter:send(event, opts)
             body_b64 = ngx.encode_base64(event.http.body)
         end
 
-        ngx.log(ngx.INFO, "Arxignis filter outbound request: method=", method,
+        ngx.log(ngx.DEBUG, "Arxignis filter outbound request: method=", method,
                 " url=", url, " headers=", headers_json, " payload=", payload,
                 body_b64 and (" body_b64=" .. body_b64) or "")
     end
@@ -290,6 +290,61 @@ function filter:send(event, opts)
     else
         return nil, "filter API request failed: " .. tostring(err)
     end
+end
+
+function filter:send_cached(event, opts)
+    opts = opts or {}
+
+    if type(event) ~= "table" then return nil, "event must be a table" end
+
+    local idempotency_key = opts.idempotency_key
+    if not idempotency_key or idempotency_key == "" then
+        return nil, "idempotency_key is required"
+    end
+
+    -- Create cache key from idempotency key
+    local cache_key = "filter:" .. idempotency_key
+
+    -- Callback function for cache miss
+    local function callback()
+        return self:send(event, opts)
+    end
+
+    -- Try to get from cache first
+    local cached_response, err, hit_level = arxignis_cache:get(
+        ngx.md5(cache_key),
+        nil,
+        callback,
+        nil,
+        { ttl = opts.cache_ttl or 300, negative_ttl = opts.cache_negative_ttl or 60 }
+    )
+
+    if err then
+        logger.error("Error getting filter response from cache", {error = err, idempotency_key = idempotency_key})
+        -- Fallback to direct API call
+        return self:send(event, opts)
+    end
+
+    -- Validate cached response
+    if not cached_response then
+        logger.error("No filter response cache received", {idempotency_key = idempotency_key})
+        -- Fallback to direct API call
+        return self:send(event, opts)
+    end
+
+    -- Log cache hit level
+    if ngx and ngx.log then
+        ngx.log(ngx.DEBUG, "Filter cache hit level: " .. (hit_level or "unknown"))
+    end
+
+    -- Log successful cached response
+    logger.info("Filter response from cache", {
+        idempotency_key = idempotency_key,
+        status = cached_response.status or "unknown",
+        cache_hit_level = hit_level or "unknown"
+    })
+
+    return cached_response, nil
 end
 
 return filter
