@@ -14,7 +14,7 @@ description = {
    homepage = "https://github.com/arxignis/lua-resty-arxignis",
    license = "Apache2"
 }
-dependencies = -0
+dependencies = {
    "lua >= 5.1",
    "lua-resty-core >= 0.1.0",
    "lua-resty-http >= 0.15.0",
