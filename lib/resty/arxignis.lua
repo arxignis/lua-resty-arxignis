@@ -197,7 +197,7 @@ function arxignis.remediate(ipaddress, country, asn)
     logger.warn("Not an SSL request - no JA4 data available or JA4 module is not loaded")
     ja4 = "no_ssl"
   elseif ja4 == nil or ja4 == "" then
-    ja4 = "unknown"
+    ja4 = ngx.req.get_headers()["AX-JA4"] or "unknown"
   end
 
   local threat_response = threat.get(ipaddress, mode)

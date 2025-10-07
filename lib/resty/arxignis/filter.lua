@@ -139,6 +139,7 @@ function filter.build_event_from_request(opts)
 
     if body then
         http_section.body = body
+        -- Use persistent body hash for consistency
         http_section.body_sha256 = compute_persistent_body_hash(body)
         http_section.content_length = #body
     else

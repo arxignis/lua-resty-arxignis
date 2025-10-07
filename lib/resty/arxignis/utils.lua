@@ -3,6 +3,7 @@ local ipinsubnet_module = require "resty.arxignis.ipinsubnet"
 local ipinsubnet = ipinsubnet_module:new()
 local resty_sha256 = require "resty.sha256"
 local str = require "resty.string"
+local cjson = require "cjson.safe"
 
 local utils = {_TYPE='module', _NAME='arxignis.utils', _VERSION='1.0-0'}
 
