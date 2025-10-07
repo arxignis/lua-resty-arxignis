@@ -209,8 +209,9 @@ function arxignis.remediate(ipaddress, country, asn)
       -- Verify secure captcha token
       local token_valid = verify_captcha_token(cookie, ipaddress, ja4)
       if token_valid then
-        logger.debug("Valid captcha token found, allowing request")
-        return true
+        logger.debug("Valid captcha token found, allowing request to proceed to filter analysis")
+        threat_response.advice = "allow"
+        break
       else
         logger.debug("Invalid captcha token found, continuing")
       end
@@ -259,6 +260,7 @@ function arxignis.remediate(ipaddress, country, asn)
     local site_key = cache:get("ARXIGNIS_CAPTCHA_SITE_KEY")
     local captcha_provider = cache:get("ARXIGNIS_CAPTCHA_PROVIDER")
     local captcha_template_path = cache:get("ARXIGNIS_CAPTCHA_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/captcha.html"
+
     -- Check if captcha is properly configured
     if not secret_key or not site_key then
       logger.error("Captcha not configured, skipping captcha challenge", {
@@ -286,14 +288,14 @@ function arxignis.remediate(ipaddress, country, asn)
       -- First try to get from POST body (for form submissions)
       if ngx.var.request_method == "POST" then
         ngx.req.read_body()
-        local args, err = ngx.req.get_post_args()
+        local args, post_err = ngx.req.get_post_args()
 
-        if args and not err then
+        if args and not post_err then
           -- Try to get captcha response using the proper key
           captcha_response = args["cf-turnstile-response"] or args["g-recaptcha-response"] or args["h-captcha-response"]
           logger.debug("POST body parsing - args: " .. (args and "found" or "nil") .. ", captcha_response: " .. (captcha_response or "nil"))
         else
-          logger.error("Error parsing POST args", {error = err or "unknown"})
+          logger.error("Error parsing POST args", {error = post_err or "unknown"})
         end
       end
 
@@ -316,27 +318,32 @@ function arxignis.remediate(ipaddress, country, asn)
           -- Generate secure captcha token
           local captcha_token = generate_captcha_token(ipaddress, ja4)
 
-          -- Set cookie and redirect to clear captcha state
+          -- Set cookie so future requests bypass the challenge
           local cookie_value = "ax_captcha=" .. captcha_token .. "; Path=/; HttpOnly; SameSite=Strict; Max-Age=7200"
           ngx.header["Set-Cookie"] = cookie_value
           logger.debug("Setting captcha cookie: " .. cookie_value)
-          ngx.redirect(ngx.var.request_uri)
-          return
+          threat_response.advice = "allow"
         else
           -- Captcha validation failed, show error and captcha again
           logger.warn("Captcha validation failed", {error = validation_error or "unknown error"})
           captcha.apply()
+          return true
         end
       else
         -- No captcha response, show the captcha form
         logger.warn("No captcha response, showing captcha form")
         captcha.apply()
+        return true
       end
     else
       ngx.status = utils.http_status_codes[500]
       ngx.header.content_type = "text/html"
       ngx.say("Error loading captcha")
       ngx.exit(utils.http_status_codes[500])
+    end
+
+    if threat_response.advice == "challenge" then
+      return true
     end
   end
 
@@ -363,58 +370,56 @@ function arxignis.remediate(ipaddress, country, asn)
     filter_event.tenant_id = threat_response.tenant_id
   end
 
-  if filter_event.http and filter_event.http.body and filter_event.http.body ~= "" then
-    local headers = ngx.req.get_headers() or {}
-    local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
-    if not raw_key or raw_key == "" then
-      raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
-    end
-    local idempotency_key = ngx.md5(raw_key)
+  local headers = ngx.req.get_headers() or {}
+  local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
+  if not raw_key or raw_key == "" then
+    raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
+  end
+  local idempotency_key = ngx.md5(raw_key)
 
-    local filter_client = filter_module.new({
-      api_url = os.getenv("ARXIGNIS_API_URL"),
-      api_key = os.getenv("ARXIGNIS_API_KEY"),
-      ssl_verify = true,
-    })
+  local filter_client = filter_module.new({
+    api_url = os.getenv("ARXIGNIS_API_URL"),
+    api_key = os.getenv("ARXIGNIS_API_KEY"),
+    ssl_verify = true,
+  })
 
-    local filter_response, filter_err = filter_client:send(filter_event, {
-      idempotency_key = idempotency_key,
-      original_event = false,
-    })
+  local filter_response, filter_err = filter_client:send(filter_event, {
+    idempotency_key = idempotency_key,
+    original_event = false,
+  })
 
-    if filter_response then
-      local details = filter_response.json and filter_response.json.details
-      local reason = filter_response.json and filter_response.json.reason
+  if filter_response then
+    local details = filter_response.json and filter_response.json.details
+    local reason = filter_response.json and filter_response.json.reason
 
-      if details then
-        if details.matched_rule then
-          reason = string.format("Request blocked by WAF rule %s", details.matched_rule)
-        elseif details.virus_detected then
-          reason = "Request blocked due to malware detection"
-        end
+    if details then
+      if details.matched_rule then
+        reason = string.format("Request blocked by WAF rule %s", details.matched_rule)
+      elseif details.virus_detected then
+        reason = "Request blocked due to malware detection"
       end
-
-      logger.info("Arxignis filter response", {
-        status = filter_response.status,
-        body = filter_response.body,
-        json = filter_response.json,
-        reason = reason,
-      })
-    elseif filter_err then
-      logger.warn("Filter analysis failed", { error = filter_err })
     end
 
-    if filter_response and filter_response.json and filter_response.json.action == "block" then
-      if mode == "monitor" then
-        logger.warn("Arxignis filter would block request in block mode", { filter_response = filter_response.json })
-      else
-        local block_template_path = cache:get("ARXIGNIS_BLOCK_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/block.html"
-        local block_template = utils.read_file(block_template_path)
-        ngx.status = utils.http_status_codes[403]
-        ngx.header.content_type = "text/html"
-        ngx.say(block_template)
-        ngx.exit(utils.http_status_codes[403])
-      end
+    logger.info("Arxignis filter response", {
+      status = filter_response.status,
+      body = filter_response.body,
+      json = filter_response.json,
+      reason = reason,
+    })
+  elseif filter_err then
+    logger.warn("Filter analysis failed", { error = filter_err })
+  end
+
+  if filter_response and filter_response.json and filter_response.json.action == "block" then
+    if mode == "monitor" then
+      logger.warn("Arxignis filter would block request in block mode", { filter_response = filter_response.json })
+    else
+      local block_template_path = cache:get("ARXIGNIS_BLOCK_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/block.html"
+      local block_template = utils.read_file(block_template_path)
+      ngx.status = utils.http_status_codes[403]
+      ngx.header.content_type = "text/html"
+      ngx.say(block_template)
+      ngx.exit(utils.http_status_codes[403])
     end
   end
 
