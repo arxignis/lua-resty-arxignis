@@ -11,11 +11,12 @@ local setmetatable = setmetatable
 local table_concat = table.concat
 local io_open = io.open
 
-local DEFAULT_BASE_URL = "https://api.arxignis.com"
+local DEFAULT_BASE_URL = "https://api.arxignis.com/v1"
 local DEFAULT_TIMEOUT = 2000
 local DEFAULT_EVENT_TYPE = "filter"
 local DEFAULT_SCHEMA_VERSION = "1.0"
 local FILTER_PATH = "/filter"
+local SCAN_PATH = "/scan"
 
 local filter = {_TYPE = "module", _NAME = "arxignis.filter", _VERSION = "1.0.0"}
 filter.__index = filter
@@ -184,6 +185,55 @@ function filter.build_event_from_request(opts)
   return event
 end
 
+local function resolve_content_type(http_section, overrides)
+  if overrides and overrides.content_type and overrides.content_type ~= "" then
+    return overrides.content_type
+  end
+
+  if http_section and http_section.content_type and http_section.content_type ~= "" then
+    return http_section.content_type
+  end
+
+  local headers = http_section and http_section.headers
+  if type(headers) == "table" then
+    for key, value in pairs(headers) do
+      if type(key) == "string" and key:lower() == "content-type" then
+        if type(value) == "table" then
+          return tostring(value[1] or "")
+        end
+        return tostring(value)
+      end
+    end
+  end
+
+  return "application/octet-stream"
+end
+
+function filter.build_scan_request_from_event(event, opts)
+  opts = opts or {}
+
+  if type(event) ~= "table" then
+    return nil, "event must be a table"
+  end
+
+  local http_section = event.http
+  if type(http_section) ~= "table" then
+    return nil, "event.http is missing"
+  end
+
+  local body = opts.body or http_section.body
+  if not body or body == "" then
+    return nil, "http.body is empty, nothing to scan"
+  end
+
+  local content_type = resolve_content_type(http_section, opts)
+
+  return {
+    content_type = content_type,
+    body = body,
+  }
+end
+
 function filter:send(event, opts)
   opts = opts or {}
 
@@ -313,6 +363,131 @@ function filter:send(event, opts)
 
   if err then
     return nil, "filter API request failed: " .. tostring(err)
+  end
+
+  local parsed_body
+  if res.body and #res.body > 0 then
+    parsed_body = cjson.decode(res.body)
+  end
+
+  return {
+    status = res.status,
+    headers = res.headers,
+    body = res.body,
+    json = parsed_body,
+  }, nil
+end
+
+function filter:scan(scan_request, opts)
+  opts = opts or {}
+
+  if type(scan_request) ~= "table" then
+    return nil, "scan_request must be a table"
+  end
+
+  if not scan_request.body or scan_request.body == "" then
+    return nil, "scan_request.body is required"
+  end
+
+  if not scan_request.content_type or scan_request.content_type == "" then
+    scan_request.content_type = "application/octet-stream"
+  end
+
+  local payload, encode_err = cjson.encode(scan_request)
+  if not payload then
+    return nil, "failed to encode scan request: " .. tostring(encode_err)
+  end
+
+  local method = "POST"
+  if opts.method and opts.method ~= "" then
+    method = tostring(opts.method):upper()
+  end
+
+  local timeout = opts.timeout or self.timeout
+  local url = self.api_url .. SCAN_PATH
+
+  local headers = {
+    ["Content-Type"] = "application/json",
+  }
+  if self.api_key and self.api_key ~= "" then
+    headers["Authorization"] = "Bearer " .. self.api_key
+  end
+  if opts.headers then
+    for key, value in pairs(opts.headers) do
+      headers[key] = value
+    end
+  end
+
+  if ngx and ngx.log then
+    local sanitized_headers = {}
+    for key, value in pairs(headers) do
+      if type(key) == "string" and key:lower() == "authorization" then
+        sanitized_headers[key] = "***"
+      else
+        sanitized_headers[key] = value
+      end
+    end
+
+    ngx.log(
+      ngx.INFO,
+      "Arxignis content scan outbound request: method=",
+      method,
+      " url=",
+      url,
+      " headers=",
+      cjson.encode(sanitized_headers),
+      " payload_length=",
+      #payload
+    )
+  end
+
+  local ssl_verify = opts.ssl_verify
+  if ssl_verify == nil then
+    ssl_verify = self.ssl_verify
+  end
+
+  local http_requester
+  if self.http_client_factory then
+    http_requester = self.http_client_factory()
+  end
+
+  if http_requester and http_requester.request_uri then
+    if http_requester.set_timeout then
+      http_requester:set_timeout(timeout)
+    end
+    local res, request_err = http_requester:request_uri(url, {
+      method = method,
+      body = payload,
+      headers = headers,
+      ssl_verify = ssl_verify,
+    })
+    if not res then
+      return nil, "scan API request failed: " .. tostring(request_err)
+    end
+
+    local parsed_body
+    if res.body and #res.body > 0 then
+      parsed_body = cjson.decode(res.body)
+    end
+
+    return {
+      status = res.status,
+      headers = res.headers,
+      body = res.body,
+      json = parsed_body,
+    }, nil
+  end
+
+  local res, err = utils.http_request(url, {
+    method = method,
+    timeout = timeout,
+    headers = headers,
+    body = payload,
+    ssl_verify = ssl_verify,
+  })
+
+  if err then
+    return nil, "scan API request failed: " .. tostring(err)
   end
 
   local parsed_body
