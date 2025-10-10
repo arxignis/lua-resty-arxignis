@@ -499,8 +499,12 @@ function filter:scan(scan_request, opts)
   if err then
     return nil, "scan API request failed: " .. tostring(err)
   end
+  if res == nil then
+    return nil, "scan API request failed: " .. tostring(err)
+  end
 
   local parsed_body
+
   if res.body and #res.body > 0 then
     parsed_body = cjson.decode(res.body)
   end
