@@ -5,7 +5,6 @@ local utils = require("resty.arxignis.utils")
 local captcha = require("resty.arxignis.captcha")
 local threat = require("resty.arxignis.threat")
 local filter_module = require("resty.arxignis.filter")
-local ngx = ngx
 
 -- Environment variable validation
 local function validate_environment()
@@ -172,7 +171,7 @@ function arxignis.remediate(ipaddress, country, asn)
       return true
   end
 
-
+  
   local rules = access_rules.check(ipaddress, country, asn)
   if rules and rules.access_rules and rules.access_rules.action == "block" then
       if mode == "monitor" then
@@ -197,24 +196,7 @@ function arxignis.remediate(ipaddress, country, asn)
     logger.warn("Not an SSL request - no JA4 data available or JA4 module is not loaded")
     ja4 = "no_ssl"
   elseif ja4 == nil or ja4 == "" then
-    ja4 = ngx.req.get_headers()["AX-JA4"] or "unknown"
-  end
-
-  local threat_response = threat.get(ipaddress, mode)
-  -- Validate threat response
-  if not threat_response then
-    logger.warn("No threat response received for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if threat fails
-  end
-
-  if not threat_response.intel then
-    logger.warn("Invalid threat response structure for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if threat response is invalid
-  end
-
-  if not threat_response.advice then
-    logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
-    return true -- Allow request to proceed if action is missing
+    ja4 = "unknown"
   end
 
   -- Check for existing captcha token in cookies
@@ -234,6 +216,23 @@ function arxignis.remediate(ipaddress, country, asn)
         logger.debug("Invalid captcha token found, continuing")
       end
     end
+  end
+
+  local threat_response = threat.get(ipaddress, mode)
+  -- Validate threat response
+  if not threat_response then
+    logger.warn("No threat response received for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if threat fails
+  end
+
+  if not threat_response.intel then
+    logger.warn("Invalid threat response structure for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if threat response is invalid
+  end
+
+  if not threat_response.advice then
+    logger.warn("Missing action in threat response for IP", {ip_address = ipaddress})
+    return true -- Allow request to proceed if action is missing
   end
 
   if threat_response.advice == "block" then
@@ -348,7 +347,7 @@ function arxignis.remediate(ipaddress, country, asn)
     end
   end
 
-  -- Run filter analysis only after remediation has allowed request to continue
+  -- Run WAF analysis and content scanning when remediation allows request
   local additional = {
     remediation = threat_response and threat_response.advice or "unknown",
     threat_score = threat_response and threat_response.intel and threat_response.intel.score or nil,
@@ -367,22 +366,37 @@ function arxignis.remediate(ipaddress, country, asn)
   end
 
   local filter_event = event_or_err
-
-  -- Generate idempotency key from method|path|body_sha256|host
-  local method = ""
-  local path = ""
-  local body_sha256 = ""
-  local host = ""
-
-  if filter_event and filter_event.http then
-    method = filter_event.http.method or ""
-    path = filter_event.http.path or ""
-    body_sha256 = filter_event.http.body_sha256 or ""
-    host = filter_event.http.host or ""
+  if (not filter_event.tenant_id or filter_event.tenant_id == "") and threat_response and threat_response.tenant_id then
+    filter_event.tenant_id = threat_response.tenant_id
   end
 
-  local idempotency_raw = method .. "|" .. path .. "|" .. body_sha256 .. "|" .. host .. "|" .. ipaddress
-  local idempotency_key = utils.compute_sha256(idempotency_raw)
+  local function respond_with_block(reason, source, payload)
+    local metadata = {
+      reason = reason or "Request blocked",
+      source = source or "arxignis",
+      payload = payload,
+    }
+
+    if mode == "monitor" then
+      logger.warn("Arxignis would block request in block mode", metadata)
+      return true
+    end
+
+    local block_template_path = cache:get("ARXIGNIS_BLOCK_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/block.html"
+    local block_template = utils.read_file(block_template_path)
+    logger.info("Blocking request due to Arxignis decision", metadata)
+    ngx.status = utils.http_status_codes[403]
+    ngx.header.content_type = "text/html"
+    ngx.say(block_template)
+    ngx.exit(utils.http_status_codes[403])
+  end
+
+  local headers = ngx.req.get_headers() or {}
+  local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
+  if not raw_key or raw_key == "" then
+    raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
+  end
+  local idempotency_key = ngx.md5(raw_key)
 
   local filter_client = filter_module.new({
     api_url = os.getenv("ARXIGNIS_API_URL"),
@@ -390,46 +404,68 @@ function arxignis.remediate(ipaddress, country, asn)
     ssl_verify = true,
   })
 
-  local filter_response, filter_err = filter_client:send_cached(filter_event, {
-    idempotency_key = idempotency_key,
-    original_event = false,
-    cache_ttl = 300,
-    cache_negative_ttl = 60,
+  local http_section = filter_event.http or {}
+  logger.debug("Arxignis filter request metadata", {
+    method = http_section.method,
+    path = http_section.path,
+    content_type = http_section.content_type,
+    content_length = http_section.content_length,
+    has_body = http_section.body and http_section.body ~= "",
   })
 
-  if filter_response then
-    local details = filter_response.json and filter_response.json.details
-    local reason = filter_response.json and filter_response.json.reason
+  local filter_response, filter_err = filter_client:send(filter_event, {
+    idempotency_key = idempotency_key,
+    original_event = false,
+  })
 
-    if details then
-      if details.matched_rule then
-        reason = string.format("Request blocked by WAF rule %s", details.matched_rule)
-      elseif details.virus_detected then
-        reason = "Request blocked due to malware detection"
-      end
+  local waf_action = "allow"
+  local waf_reason = nil
+  local waf_details = nil
+
+  if filter_response and filter_response.json then
+    waf_action = filter_response.json.action or "allow"
+    waf_details = filter_response.json.details
+    waf_reason = filter_response.json.reason
+
+    if waf_details and waf_details.matched_rule then
+      waf_reason = string.format("Request blocked by WAF rule %s", waf_details.matched_rule)
     end
 
-    logger.info("Arxignis filter response", {
-      status = filter_response.status,
-      body = filter_response.body,
-      json = filter_response.json,
-      reason = reason,
-    })
   elseif filter_err then
-    logger.warn("Filter analysis failed", { error = filter_err })
+    logger.warn("Arxignis WAF request failed", { error = filter_err })
   end
 
-  if filter_response and filter_response.json and filter_response.json.action == "block" then
-    if mode == "monitor" then
-      logger.warn("Arxignis filter would block request in block mode", { filter_response = filter_response.json })
-    else
-      local block_template_path = cache:get("ARXIGNIS_BLOCK_TEMPLATE_PATH") or "/usr/local/openresty/luajit/lib/lua/5.1/resty/arxignis/templates/block.html"
-      local block_template = utils.read_file(block_template_path)
-      ngx.status = utils.http_status_codes[403]
-      ngx.header.content_type = "text/html"
-      ngx.say(block_template)
-      ngx.exit(utils.http_status_codes[403])
+  if waf_action == "block" then
+    return respond_with_block(waf_reason or "Request blocked by WAF", "waf", filter_response and filter_response.json or nil)
+  end
+
+  local should_scan = filter_event.http and filter_event.http.body and filter_event.http.body ~= ""
+  if not should_scan then
+    return true
+  end
+
+  local scan_request, scan_request_err = filter_module.build_scan_request_from_event(filter_event)
+  if not scan_request then
+    logger.warn("Unable to build content scan request", { error = scan_request_err })
+    return true
+  end
+
+  local scan_response, scan_err = filter_client:scan(scan_request)
+
+  if scan_response and scan_response.json then
+    local scan_json = scan_response.json
+    local virus_detected = scan_json.virus_detected or (scan_json.files_infected and scan_json.files_infected > 0)
+    if virus_detected then
+      local virus_reason = scan_json.virus_name and ("Request blocked due to malware detection: " .. scan_json.virus_name) or "Request blocked due to malware detection"
+      return respond_with_block(virus_reason, "content_scan", scan_json)
     end
+
+    logger.info("Arxignis content scan response", {
+      status = scan_response.status,
+      json = scan_json,
+    })
+  elseif scan_err then
+    logger.warn("Arxignis content scan request failed", { error = scan_err })
   end
 
   return true

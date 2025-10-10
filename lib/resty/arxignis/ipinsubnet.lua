@@ -73,6 +73,7 @@ function BinaryTree.insertIPv4(value, node, num_bits)
     local curent_num_bits = 0
     local j = 1
     local size_value = #value
+    local c
     for i = 1, size_value do
         c = value:sub(i, i)
 
@@ -95,6 +96,7 @@ function BinaryTree.insertIPv4(value, node, num_bits)
 
         ::process_byte::
         -- ngx.say("dec : ", dec)
+        local mbit
         for k = 7, 0, -1 do
 
             -- get most significant bit
@@ -144,6 +146,7 @@ function BinaryTree.searchIPv4(value, node)
     local dec
     local j = 1
     local size_value = #value
+    local c
     for i = 1, size_value do
         c = value:sub(i, i)
 
@@ -166,6 +169,7 @@ function BinaryTree.searchIPv4(value, node)
 
         ::search_byte::
         -- ngx.say("dec : ", dec)
+        local mbit
         for k = 7, 0, -1 do
 
             -- get most significant bit
@@ -211,6 +215,7 @@ function BinaryTree.insertIPv6(value, node, num_bits)
     local current_num_of_bits = 0
     local END = 0
     local decompressed = ""
+    local mhex
     -- ngx.say("value : ", value)
     for i = 1, #value do
         -- stop if we reach the mask
@@ -332,6 +337,7 @@ end
     return next node and the current number of bits
 ]]
 function BinaryTree.append4Bits(node, value, num_bits, current_num_of_bits)
+    local mbit
     for i = 3, 0, -1 do
 
         -- append 0
@@ -381,6 +387,7 @@ function BinaryTree.searchIPv6(value, node)
     local current_num_of_bits = 0
     local END = 0
     local decompressed = ""
+    local mhex
     -- ngx.say("value : ", value)
     for i = 1, #value do
         -- stop if we reach the mask
@@ -488,6 +495,7 @@ end
     return next node and the result if found
 ]]
 function BinaryTree.search4Bits(node, value)
+    local mbit
     for i = 3, 0, -1 do
         -- append 0
         mbit = bit.band(bit.rshift(value, i), 1)
@@ -529,6 +537,7 @@ function BinaryTree.decompressedIPv6(value)
     local current_num_of_groups = 0
     local END = 0
     local decompressed = ""
+    local mhex
     -- ngx.say("value : ", value)
     for i = 1, #value do
         mhex = value:sub(i, i)
