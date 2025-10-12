@@ -218,11 +218,6 @@ function filter:send(event, opts)
 
     if type(event) ~= "table" then return nil, "event must be a table" end
 
-    local idempotency_key = opts.idempotency_key
-    if not idempotency_key or idempotency_key == "" then
-        return nil, "idempotency_key is required"
-    end
-
     local payload, encode_err = cjson.encode(event)
     if not payload then
         return nil, "failed to encode filter event: " .. tostring(encode_err)
@@ -234,7 +229,7 @@ function filter:send(event, opts)
     end
 
     local timeout = opts.timeout or self.timeout
-    local query_args = {["idempotency-key"] = idempotency_key}
+    local query_args = {}
 
     local original_event = opts.original_event
     if original_event == nil then original_event = false end
@@ -271,9 +266,9 @@ function filter:send(event, opts)
             body_b64 = ngx.encode_base64(event.http.body)
         end
 
-        ngx.log(ngx.DEBUG, "Arxignis filter outbound request: method=", method,
-                " url=", url, " headers=", headers_json, " payload=", payload,
-                body_b64 and (" body_b64=" .. body_b64) or "")
+        logger.debug("Arxignis filter outbound request: method=" .. method ..
+                " url=" .. url .. " headers=" .. headers_json .. " payload=" .. payload ..
+                (body_b64 and (" body_b64=" .. body_b64) or ""))
     end
 
     local ssl_verify = opts.ssl_verify
@@ -321,6 +316,11 @@ function filter:send(event, opts)
 
     if err then return nil, "filter API request failed: " .. tostring(err) end
 
+    if res and res.status and res.status >= 200 then
+      logger.error("Arxignis filter inbound response: status=" .. res.status ..
+                " headers=" .. cjson.encode(res.headers) .. " body=" .. res.body)
+    end
+
     local parsed_body
     if res and res.body and type(res.body) == "string" and #res.body > 0 then
         parsed_body = cjson.decode(res.body)
@@ -336,56 +336,6 @@ function filter:send(event, opts)
     else
         return nil, "filter API request failed: " .. tostring(err)
     end
-end
-
-function filter:send_cached(event, opts)
-    opts = opts or {}
-
-    if type(event) ~= "table" then return nil, "event must be a table" end
-
-    local idempotency_key = opts.idempotency_key
-    if not idempotency_key or idempotency_key == "" then
-        return nil, "idempotency_key is required"
-    end
-
-    -- Create cache key from idempotency key
-    local cache_key = "filter:" .. idempotency_key
-
-    -- Callback function for cache miss
-    local function callback()
-        return self:send(event, opts)
-    end
-
-    -- Try to get from cache first
-    local cached_response, err, hit_level = arxignis_cache:get(
-        ngx.md5(cache_key),
-        nil,
-        callback,
-        nil,
-        { ttl = opts.cache_ttl or 300, negative_ttl = opts.cache_negative_ttl or 60 }
-    )
-
-    if err then
-        logger.error("Error getting filter response from cache", {error = err, idempotency_key = idempotency_key})
-        -- Fallback to direct API call
-        return self:send(event, opts)
-    end
-
-    -- Validate cached response
-    if not cached_response then
-        logger.error("No filter response cache received", {idempotency_key = idempotency_key})
-        -- Fallback to direct API call
-        return self:send(event, opts)
-    end
-
-    -- Log successful cached response
-    logger.debug("Filter response from cache", {
-        idempotency_key = idempotency_key,
-        status = cached_response.status or "unknown",
-        cache_hit_level = hit_level or "unknown"
-    })
-
-    return cached_response, nil
 end
 
 function filter:scan(scan_request, opts)

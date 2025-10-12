@@ -1,13 +1,11 @@
 local cjson = require "cjson"
 local utils = require "resty.arxignis.utils"
+local config = require "resty.arxignis.config"
 
 local worker = {_TYPE='module', _NAME='arxignis.worker', _VERSION='1.0-0'}
 
 -- Version constant
 local VERSION = '0.0.1'
-
--- API global URL
-local API_GLOBAL_URL = 'https://api.arxignis.com/v1'
 
 -- Shared memory configuration
 local SHARED_DICT_NAME = "arxignis_queue"
@@ -36,7 +34,7 @@ local function get_lock(lock_key, interval)
 end
 
 local function make_batch_api_request(env, entries, endpoint)
-    local api_url = env.ARXIGNIS_API_URL or API_GLOBAL_URL
+    local api_url = config.get_api_url()
     local url = api_url .. endpoint
 
     ngx.log(ngx.DEBUG, "Making batch API request to: " .. url .. " with " .. #entries .. " entries")
@@ -46,8 +44,9 @@ local function make_batch_api_request(env, entries, endpoint)
         ['Content-Type'] = 'application/json'
     }
 
-    if env.ARXIGNIS_API_KEY then
-        headers['Authorization'] = 'Bearer ' .. env.ARXIGNIS_API_KEY
+    local api_key = config.get_api_key()
+    if api_key then
+        headers['Authorization'] = 'Bearer ' .. api_key
         ngx.log(ngx.DEBUG, "Using API key for authentication")
     else
         ngx.log(ngx.WARN, "No API key provided, request will be unauthenticated")
@@ -72,7 +71,7 @@ local function make_batch_api_request(env, entries, endpoint)
     elseif res and res.status ~= 200 then
         ngx.log(ngx.ERR, "Batch API request failed with status " .. (res.status or "unknown") .. ": " .. (res.body or ""))
     else
-        ngx.log(ngx.DEBUG, "Batch API request successful, status: " .. (res.status or "unknown"))
+        ngx.log(ngx.DEBUG, "Batch API request successful, status: " .. (res and res.status or "unknown"))
     end
 end
 
@@ -320,11 +319,11 @@ local function flush_metrics_timer(premature, env)
 end
 
 -- Function to start the timers (call this in init_worker_by_lua)
-function worker.start_flush_timers(env)
+function worker.start_flush_timers()
     ngx.log(ngx.DEBUG, "Starting flush timers for worker " .. ngx.worker.id())
 
     -- Start the logs timer
-    local ok, err = ngx.timer.at(FLUSH_INTERVAL, flush_logs_timer, env)
+    local ok, err = ngx.timer.at(FLUSH_INTERVAL, flush_logs_timer)
     if not ok then
         ngx.log(ngx.ERR, "Failed to start logs flush timer: " .. (err or "unknown error"))
     else
@@ -332,7 +331,7 @@ function worker.start_flush_timers(env)
     end
 
     -- Start the metrics timer
-    local ok2, err2 = ngx.timer.at(FLUSH_INTERVAL, flush_metrics_timer, env)
+    local ok2, err2 = ngx.timer.at(FLUSH_INTERVAL, flush_metrics_timer)
     if not ok2 then
         ngx.log(ngx.ERR, "Failed to start metrics flush timer: " .. (err2 or "unknown error"))
     else
@@ -342,7 +341,7 @@ function worker.start_flush_timers(env)
 end
 
 -- Function to flush remaining logs (call this in worker shutdown)
-function worker.flush_remaining_logs(env)
+function worker.flush_remaining_logs()
     local dict = ngx.shared[SHARED_DICT_NAME]
     if not dict then
         return
@@ -354,7 +353,7 @@ function worker.flush_remaining_logs(env)
     if batch_data and batch_data ~= "" then
         local success, batch = pcall(cjson.decode, batch_data)
         if success and #batch > 0 then
-            make_batch_api_request(env, batch, "/log/batch")
+            make_batch_api_request(batch, "/log/batch")
             dict:set(batch_key, "")
             ngx.log(ngx.DEBUG, "Flushed remaining " .. #batch .. " logs from worker " .. ngx.worker.id())
         end
@@ -362,7 +361,7 @@ function worker.flush_remaining_logs(env)
 end
 
 -- Function to flush remaining metrics (call this in worker shutdown)
-function worker.flush_remaining_metrics(env)
+function worker.flush_remaining_metrics()
     local dict = ngx.shared[SHARED_DICT_NAME]
     if not dict then
         return
@@ -374,7 +373,7 @@ function worker.flush_remaining_metrics(env)
     if batch_data and batch_data ~= "" then
         local success, batch = pcall(cjson.decode, batch_data)
         if success and #batch > 0 then
-            make_batch_api_request(env, batch, "/metrics/batch")
+            make_batch_api_request(batch, "/metrics/batch")
             dict:set(batch_key, "")
             ngx.log(ngx.DEBUG, "Flushed remaining " .. #batch .. " metrics from worker " .. ngx.worker.id())
         end

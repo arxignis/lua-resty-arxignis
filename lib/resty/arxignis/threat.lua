@@ -4,11 +4,7 @@ local cjson = require("cjson")
 local logger = require("resty.arxignis.logger")
 local log_module = require("resty.arxignis.log")
 local metrics = require("resty.arxignis.metrics")
-
-local env = {
-  ARXIGNIS_API_URL = os.getenv("ARXIGNIS_API_URL"),
-  ARXIGNIS_API_KEY = os.getenv("ARXIGNIS_API_KEY")
-}
+local config = require("resty.arxignis.config")
 
 
 local DEFAULT_RESPONSE = {
@@ -42,7 +38,7 @@ local DEFAULT_RESPONSE = {
 }
 
 function threat.get(ipaddress, mode)
-  local log_data = log_module.log(env, nil, ipaddress)
+  local log_data = log_module.log(config.get_env(), nil, ipaddress)
 
   -- Ensure we have valid log data
   if not log_data then
@@ -67,7 +63,7 @@ function threat.get(ipaddress, mode)
   -- Fall back to remediation API if no access rule matches
   local function callback()
 
-    local api_url = env.ARXIGNIS_API_URL
+    local api_url = config.get_api_url()
     if not api_url or api_url == "" then
         logger.warn("ARXIGNIS_API_URL not set, using default response")
         return DEFAULT_RESPONSE
@@ -75,7 +71,7 @@ function threat.get(ipaddress, mode)
 
     local url = api_url .. "/threat?ip=" .. ipaddress
     local timeout = 1000
-    local api_key = env.ARXIGNIS_API_KEY
+    local api_key = config.get_api_key()
     local ssl_verify = true
 
     local res, err = utils.get_http_request(url, timeout, api_key, ssl_verify)
@@ -165,7 +161,7 @@ function threat.get(ipaddress, mode)
 
   if threat_response_cache.advice ~= "none" then
     if mode == "block" then
-      metrics.metrics(env, metrics_data)
+      metrics.metrics(config.get_env(), metrics_data)
     end
   end
 

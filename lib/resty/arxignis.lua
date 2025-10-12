@@ -5,32 +5,13 @@ local utils = require("resty.arxignis.utils")
 local captcha = require("resty.arxignis.captcha")
 local threat = require("resty.arxignis.threat")
 local filter_module = require("resty.arxignis.filter")
+local config = require("resty.arxignis.config")
 
 -- Environment variable validation
 local function validate_environment()
-    local required_vars = {
-        "ARXIGNIS_API_URL",
-        "ARXIGNIS_API_KEY",
-        "ARXIGNIS_CAPTCHA_SECRET_KEY",
-        "ARXIGNIS_CAPTCHA_SITE_KEY",
-        "ARXIGNIS_CAPTCHA_PROVIDER"
-    }
+    local is_valid, missing_vars = config.validate()
 
-    local missing_vars = {}
-    local cache = ngx.shared.arxignis_cache
-
-    for _, var_name in ipairs(required_vars) do
-        local value = os.getenv(var_name)
-        ngx.log(ngx.DEBUG, "Environment variable: " .. var_name .. " = " .. (value or "nil"))
-        if not value or value == "" then
-            table.insert(missing_vars, var_name)
-        else
-            -- Store in shared dictionary for later use
-            cache:set(var_name, value)
-        end
-    end
-
-    if #missing_vars > 0 then
+    if not is_valid then
         logger.error("Missing required environment variables", {
             missing_variables = table.concat(missing_vars, ", "),
             message = "Arxignis integration will not function properly without these variables"
@@ -38,13 +19,16 @@ local function validate_environment()
         return false
     end
 
+    -- Store configuration in shared cache for performance
+    config.store_in_cache()
+
     return true
 end
 
 -- Check environment variables at module load
 local env_valid = validate_environment()
 
-local mode = os.getenv("ARXIGNIS_MODE")
+local mode = config.get_mode()
 if mode ~= "block" then
     mode = "monitor"
     logger.warn("ARXIGNIS_MODE is not set, defaulting to monitor mode")
@@ -171,7 +155,6 @@ function arxignis.remediate(ipaddress, country, asn)
       return true
   end
 
-  
   local rules = access_rules.check(ipaddress, country, asn)
   if rules and rules.access_rules and rules.access_rules.action == "block" then
       if mode == "monitor" then
@@ -184,6 +167,8 @@ function arxignis.remediate(ipaddress, country, asn)
       ngx.header.content_type = "text/html"
       ngx.say(block_template)
       ngx.exit(utils.http_status_codes[403])
+  elseif rules == nil then
+    logger.warn("No access rules found", {ip_address = ipaddress})
   elseif rules and rules.access_rules and rules.access_rules.action == "allow" then
       return true
   end
@@ -203,22 +188,22 @@ function arxignis.remediate(ipaddress, country, asn)
   local cookies = ngx.var.http_cookie
   logger.debug("Cookie check - cookies: " .. (cookies or "nil") .. ", IP: " .. ipaddress)
   if cookies then
-    -- Parse cookies more robustly
-    for cookie in cookies:gmatch("ax_captcha=([^;%s]+)") do
-      logger.debug("Found ax_captcha cookie: " .. cookie)
-      -- Verify secure captcha token
-      local token_valid = verify_captcha_token(cookie, ipaddress, ja4)
-      if token_valid then
-        logger.debug("Valid captcha token found, allowing request to proceed to filter analysis")
-        threat_response.advice = "allow"
-        break
-      else
-        logger.debug("Invalid captcha token found, continuing")
-      end
+  -- Parse cookies more robustly
+  for cookie in cookies:gmatch("ax_captcha=([^;%s]+)") do
+    logger.debug("Found ax_captcha cookie: " .. cookie)
+    -- Verify secure captcha token
+    local token_valid = verify_captcha_token(cookie, ipaddress, ja4)
+    if token_valid then
+      logger.debug("Valid captcha token found, allowing request to proceed to filter analysis")
+      -- Return early with allow response
+      return true
+    else
+      logger.debug("Invalid captcha token found, continuing")
     end
   end
+end
 
-  local threat_response = threat.get(ipaddress, mode)
+local threat_response = threat.get(ipaddress, mode)
   -- Validate threat response
   if not threat_response then
     logger.warn("No threat response received for IP", {ip_address = ipaddress})
@@ -356,7 +341,6 @@ function arxignis.remediate(ipaddress, country, asn)
   }
 
   local ok_event, event_or_err = pcall(filter_module.build_event_from_request, {
-    tenant_id = os.getenv("ARXIGNIS_TENANT_ID"),
     additional = additional,
   })
 
@@ -366,7 +350,7 @@ function arxignis.remediate(ipaddress, country, asn)
   end
 
   local filter_event = event_or_err
-  if (not filter_event.tenant_id or filter_event.tenant_id == "") and threat_response and threat_response.tenant_id then
+  if filter_event and (not filter_event.tenant_id or filter_event.tenant_id == "") and threat_response and threat_response.tenant_id then
     filter_event.tenant_id = threat_response.tenant_id
   end
 
@@ -391,20 +375,13 @@ function arxignis.remediate(ipaddress, country, asn)
     ngx.exit(utils.http_status_codes[403])
   end
 
-  local headers = ngx.req.get_headers() or {}
-  local raw_key = ngx.var.request_id or ngx.var.req_id or headers["x-request-id"] or headers["X-Request-ID"]
-  if not raw_key or raw_key == "" then
-    raw_key = (ngx.var.remote_addr or "unknown") .. ":" .. tostring(ngx.now()) .. ":" .. tostring(math.random())
-  end
-  local idempotency_key = ngx.md5(raw_key)
-
   local filter_client = filter_module.new({
-    api_url = os.getenv("ARXIGNIS_API_URL"),
-    api_key = os.getenv("ARXIGNIS_API_KEY"),
+    api_url = config.get_api_url(),
+    api_key = config.get_api_key(),
     ssl_verify = true,
   })
 
-  local http_section = filter_event.http or {}
+  local http_section = filter_event and filter_event.http or {}
   logger.debug("Arxignis filter request metadata", {
     method = http_section.method,
     path = http_section.path,
@@ -414,7 +391,6 @@ function arxignis.remediate(ipaddress, country, asn)
   })
 
   local filter_response, filter_err = filter_client:send(filter_event, {
-    idempotency_key = idempotency_key,
     original_event = false,
   })
 
@@ -439,7 +415,7 @@ function arxignis.remediate(ipaddress, country, asn)
     return respond_with_block(waf_reason or "Request blocked by WAF", "waf", filter_response and filter_response.json or nil)
   end
 
-  local should_scan = filter_event.http and filter_event.http.body and filter_event.http.body ~= ""
+  local should_scan = filter_event and filter_event.http and filter_event.http.body and filter_event.http.body ~= ""
   if not should_scan then
     return true
   end
