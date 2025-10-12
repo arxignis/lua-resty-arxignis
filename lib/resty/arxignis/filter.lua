@@ -317,7 +317,7 @@ function filter:send(event, opts)
     if err then return nil, "filter API request failed: " .. tostring(err) end
 
     if res and res.status and res.status >= 200 then
-      logger.error("Arxignis filter inbound response: status=" .. res.status ..
+      logger.debug("Arxignis filter inbound response: status=" .. res.status ..
                 " headers=" .. cjson.encode(res.headers) .. " body=" .. res.body)
     end
 
