@@ -2,14 +2,10 @@ local cjson = require("cjson")
 local utils = require("resty.arxignis.utils")
 local logger = require("resty.arxignis.logger")
 local metrics = require("resty.arxignis.metrics")
+local config = require("resty.arxignis.config")
 
 local access_rules = {_TYPE='module', _NAME='arxignis.access_rules', _VERSION='1.0-0'}
-local rule_id = os.getenv("ARXIGNIS_ACCESS_RULE_ID")
-local env = {
-  ARXIGNIS_API_URL = os.getenv("ARXIGNIS_API_URL"),
-  ARXIGNIS_API_KEY = os.getenv("ARXIGNIS_API_KEY")
-}
-
+local rule_id = config.get_access_rule_id()
 
 if not rule_id or rule_id == "" then
   logger.warn("ARXIGNIS_ACCESS_RULE_ID not set; access rules disabled")
@@ -129,16 +125,22 @@ local function has_any_ip_ranges(rules)
 end
 
 local function fetch_rules(resolve)
-  if not env.ARXIGNIS_API_URL or env.ARXIGNIS_API_URL == "" then
+  local api_url = config.get_api_url()
+  if not api_url or api_url == "" then
     logger.error("ARXIGNIS_API_URL not set; access rules disabled")
     return nil, "missing_api_url"
   end
 
-  local url = env.ARXIGNIS_API_URL .. "/access-rules/" .. rule_id .. "?resolve=" .. tostring(resolve)
-  local timeout = 2000
-  local ssl_verify = env.ARXIGNIS_API_SSL_VERIFY or true
+  if rule_id == nil or rule_id == "" then
+    logger.warn("ARXIGNIS_ACCESS_RULE_ID not set; access rules disabled")
+    return nil, "missing_rule_id"
+  end
 
-  local res, err = utils.get_http_request(url, timeout, env.ARXIGNIS_API_KEY, ssl_verify)
+  local url = api_url .. "/access-rules/" .. rule_id .. "?resolve=" .. tostring(resolve)
+  local timeout = 2000
+  local ssl_verify = true
+
+  local res, err = utils.get_http_request(url, timeout, config.get_api_key(), ssl_verify)
   if err then
     return nil, err
   end
@@ -304,7 +306,7 @@ function access_rules.evaluate(ip, country, asn, rules, resolve)
         ruleId = rule.id,
         source = "access_rules"
       }
-      metrics.metrics(env, metrics_data)
+      metrics.metrics(config.get_env(), metrics_data)
       return { action = "block", ruleId = rule.id, expired = 600 }
     end
 
