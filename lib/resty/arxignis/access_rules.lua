@@ -137,7 +137,7 @@ local function fetch_rules(resolve)
   end
 
   local url = api_url .. "/access-rules/" .. rule_id .. "?resolve=" .. tostring(resolve)
-  local timeout = 2000
+  local timeout = 10000
   local ssl_verify = true
 
   local res, err = utils.get_http_request(url, timeout, config.get_api_key(), ssl_verify)
@@ -315,7 +315,7 @@ function access_rules.evaluate(ip, country, asn, rules, resolve)
       return { action = "allow", ruleId = rule.id, expired = 600 }
     end
   end
-  return nil
+  return { action = "none", ruleId = "none", expired = 30 }
 end
 
 return access_rules

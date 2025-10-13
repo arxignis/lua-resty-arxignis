@@ -9,7 +9,9 @@ local _config = {
     captcha_provider = nil,
     mode = "monitor",
     access_rule_id = nil,
-    initialized = false
+    initialized = false,
+    captcha_template_path = nil,
+    block_template_path = nil
 }
 
 -- Initialize configuration from environment variables
@@ -86,7 +88,9 @@ function config.get_env()
         ARXIGNIS_CAPTCHA_SECRET_KEY = _config.captcha_secret_key,
         ARXIGNIS_CAPTCHA_PROVIDER = _config.captcha_provider,
         ARXIGNIS_MODE = _config.mode,
-        ARXIGNIS_ACCESS_RULE_ID = _config.access_rule_id
+        ARXIGNIS_ACCESS_RULE_ID = _config.access_rule_id,
+        ARXIGNIS_CAPTCHA_TEMPLATE_PATH = _config.captcha_template_path,
+        ARXIGNIS_BLOCK_TEMPLATE_PATH = _config.block_template_path
     }
 end
 
